@@ -1,0 +1,74 @@
+{
+  "_comment": [
+    "EXAMPLE ONLY. Copy to <hive>/policy/authority.json to activate.",
+    "",
+    "This file is never active from inside the repo: the engine reads only",
+    "<hive>/policy/authority.json, and with no such file the harness behaves exactly",
+    "as it did before this feature existed - nothing evaluated, nothing logged,",
+    "nothing denied.",
+    "",
+    "Three rules is the intended size. Adding a fourth is a decision, not a",
+    "detail; by the tenth, adopt a real policy engine (OPA/Rego) instead of",
+    "growing the matcher vocabulary here.",
+    "",
+    "Every rule below ships mode: dry_run. In dry_run the rule is evaluated and",
+    "logged but the action PROCEEDS. Promote one rule at a time to \"live\" only",
+    "after a week of adjudicated decisions with no false positive - you cannot",
+    "measure a false positive after enforcing, because the deny already stopped",
+    "the work you would have judged.",
+    "",
+    "Matchers: tool | path_glob | path_not_glob | command_matches |",
+    "command_not_matches. Within a rule every key must match. Rules are tried in",
+    "file order and the first match wins. For OR, write two rules.",
+    "${AGENT_ID} is the only interpolation; a rule using it does not match a",
+    "payload with no agent id."
+  ],
+  "version": 1,
+  "defaults": {
+    "mode": "dry_run",
+    "on_error": "allow"
+  },
+  "rules": [
+    {
+      "id": "cross-agent-write",
+      "description": "An agent may only write inside its own agent folder.",
+      "decision": "deny",
+      "mode": "dry_run",
+      "on_error": "allow",
+      "_on_error_why": "A bug in path matching must not be able to stop every agent from writing its own files. A missed write is one recoverable file; a false deny is the whole floor.",
+      "match": {
+        "tool": ["Write", "Edit", "NotebookEdit"],
+        "path_glob": "**/hive/agents/*/**",
+        "path_not_glob": "**/hive/agents/${AGENT_ID}/**"
+      },
+      "reason": "Agent folders are owned by their agent. Write your message to your own outbox/ instead - the harness delivers it. Reading another agent's files is fine."
+    },
+    {
+      "id": "destructive-shared-state",
+      "description": "mempalace sync/repair rewrites shared memory and can drop every per-agent wing.",
+      "decision": "deny",
+      "mode": "dry_run",
+      "on_error": "deny",
+      "_on_error_why": "The one rule that fails closed. It guards an irreversible wipe, so refusing an unevaluable command costs one retry while allowing it can cost every agent's memory.",
+      "match": {
+        "tool": "Bash",
+        "command_matches": "^\\s*mempalace\\s+(sync|repair)\\b"
+      },
+      "reason": "mempalace sync deletes every per-agent wing and cannot be undone. To record something, append to your own memory.md - it is mined automatically. If a palace really needs repairing, ask the operator."
+    },
+    {
+      "id": "remote-push",
+      "description": "Pushing to a remote is the operator's call.",
+      "decision": "ask",
+      "mode": "dry_run",
+      "on_error": "allow",
+      "_on_error_why": "Fails open because an unasked push is recoverable, while an office that cannot push is blocked on a human for every change.",
+      "_match_why": "Anchored to a command position, never a bare substring. The -C/-c branch matters: `git -C <dir> push` is how a push gets issued from outside a repo, and a pattern without it misses exactly that case. Anchoring also means a MENTION of git push - in a heredoc, an echo, or a grep - correctly does not fire.",
+      "match": {
+        "tool": "Bash",
+        "command_matches": "(^|[;&|]\\s*)git\\s+(?:-[Cc]\\s+\\S+\\s+|-{1,2}\\S+\\s+)*push\\b"
+      },
+      "reason": "Pushing publishes work outside this machine, so it is the operator's decision. Commit to a branch, report the branch name, and ask before pushing."
+    }
+  ]
+}

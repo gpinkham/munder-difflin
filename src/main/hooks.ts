@@ -19,6 +19,7 @@ import type { ControlRegistry } from './control';
 import type { CircuitBreaker } from './breaker';
 import { estimateCostUsd } from './pricing';
 import { validateHookEvent } from '../shared/hookEvents';
+import { PolicyEngine } from './policy';
 
 /** Maximum JSON payload bytes in one newline-delimited hook frame. */
 const MAX_HOOK_FRAME_BYTES = 256 * 1024;
@@ -67,6 +68,11 @@ export class HookServer {
    *  prompt only bloats the transcript. One entry per agent is sufficient: an
    *  agent has one live session, and a new session id replaces the old entry. */
   private deliveredGoalByAgent = new Map<string, { sessionId: string | null; goal: string | null }>();
+
+  /** Opt-in authority policy (policy.ts). Built on first use so a harness with no
+   *  policy file pays nothing, and so tests that construct a HookServer without a
+   *  hive root behave exactly as before. */
+  private policy: PolicyEngine | null = null;
 
   constructor(
     private hive: HiveManager,
@@ -130,7 +136,26 @@ export class HookServer {
     this.server.listen(sock);
   }
 
+  /** Build the policy engine once, on first PreToolUse. */
+  private policyEngine(): PolicyEngine {
+    if (!this.policy) {
+      this.policy = new PolicyEngine(
+        this.hive.root(),
+        (row) => this.hive.appendLog(row as Parameters<HiveManager['appendLog']>[0]),
+        // Providers whose bridge cannot receive a decision, named at load time
+        // rather than left to be discovered: pi and opencode post fire-and-forget,
+        // and the qwen proxy synthesizes PostToolUse only (it observes traffic
+        // after the fact, so there is no before-the-action boundary to hold).
+        () => ['pi', 'opencode', 'qwen']
+      );
+      this.policy.load();
+    }
+    return this.policy;
+  }
+
   stop(): void {
+    // Flush the false-positive denominator before the daemon goes away.
+    try { this.policy?.flushStats(); } catch { /* noop */ }
     try { this.server?.close(); } catch { /* noop */ }
     this.server = null;
     const sock = this.hive.sockPath();
@@ -283,6 +308,32 @@ export class HookServer {
             permissionDecisionReason: d.reason ?? 'Denied by operator.'
           }
         };
+      }
+    }
+
+    // 7C.3 — authority policy: a standing, declared rule evaluated AFTER operator
+    // control, so a live operator instruction always outranks a standing rule and
+    // the 7C.1 branch above stays byte-identical. Fully inert with no policy file:
+    // `active` is false, nothing is evaluated and nothing is logged.
+    if (event === 'PreToolUse') {
+      const policy = this.policyEngine();
+      if (policy.active) {
+        const v = policy.evaluate({
+          hook_event_name: event,
+          agent_id: agentId ?? null,
+          tool_name: p.tool_name,
+          tool_input: p.tool_input
+        });
+        if (v.decision !== 'allow') {
+          this.emit(agentId, event, p);
+          return {
+            hookSpecificOutput: {
+              hookEventName: 'PreToolUse',
+              permissionDecision: v.decision,
+              permissionDecisionReason: `[policy:${v.ruleId}] ${v.reason ?? 'Denied by policy.'}`
+            }
+          };
+        }
       }
     }
 
