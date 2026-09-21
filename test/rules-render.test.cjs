@@ -430,20 +430,53 @@ test('legacy store: a missing top-level rev still renders, and says so', async (
   assert.ok(rows.some((r) => r.kind === 'rules-store-no-rev'));
 });
 
-test('the REAL hive store parses and targets sensibly', async () => {
-  // Reads the actual file rather than a fixture, so a schema drift on disk shows
-  // up here instead of in production. Copied into a temp home - nothing live is
-  // written, because rendering into another agent's folder is itself rule 1.
+test('the REAL hive store matches the locked schema and targets correctly', () => {
+  // Reads the ACTUAL file rather than a fixture, so a schema drift on disk fails a
+  // test instead of surfacing in production. This assertion set was inverted once:
+  // it used to assert that a scope was UNRESOLVABLE, because the store carried
+  // `scope:"role"` and no top-level rev. god migrated the store to the locked
+  // schema, so it now asserts the healthy shape — the test earning its keep by
+  // going red the moment the file changed.
   const live = '/Users/gpinkham/HarnessAgents/hive/policy/rules.json';
   if (!fs.existsSync(live)) return; // not this machine; skip rather than fail
-  const root = home({ store: JSON.parse(fs.readFileSync(live, 'utf8')), agents: ['jim-mt6j19d5', 'dwight-mt6j3ppy', 'god'] });
+  const store = JSON.parse(fs.readFileSync(live, 'utf8'));
+
+  assert.equal(typeof store.rev, 'number',
+    'a top-level integer rev is required: reconcile compares it, and the notice keys on it');
+  for (const r of store.rules) {
+    assert.equal(typeof r.scope, 'object',
+      `${r.id}: scope must be the object form, not a legacy string`);
+    assert.ok(r.scope.kind === 'global' || r.scope.kind === 'agents',
+      `${r.id}: scope.kind must be global or agents, got ${r.scope.kind}`);
+    if (r.scope.kind === 'agents') {
+      assert.ok(Array.isArray(r.scope.ids) && r.scope.ids.length, `${r.id}: agents scope needs ids`);
+    }
+  }
+
+  const root = home({ store, agents: ['jim-mt6j19d5', 'dwight-mt6j3ppy', 'god'] });
   const { m, rows } = mgr(root);
-  const out = await m.renderFor('jim-mt6j19d5');
-  assert.equal(out.ok, true);
-  const text = read(root, 'jim-mt6j19d5');
-  assert.match(text, /BEGIN managed rules/);
-  assert.match(text, /own folder/i);
-  // The role-scoped rule reaches nobody, including the agent it names.
-  assert.equal(text.includes('CTO'), false);
-  assert.ok(rows.some((r) => r.kind === 'rules-scope-unresolvable'));
+  const ids = (agent) => m.rulesFor(agent, store.rules).map((r) => r.id);
+
+  const jim = ids('jim-mt6j19d5');
+  const dwight = ids('dwight-mt6j3ppy');
+  const god = ids('god');
+
+  // Every scope resolves now, so nothing may be silently dropped.
+  assert.equal(rows.some((r) => r.kind === 'rules-scope-unresolvable'), false,
+    'a rule nobody can be addressed by would render to nobody');
+
+  // The agent-scoped rule reaches exactly the agent it names.
+  assert.ok(dwight.includes('no-review-cto-pr'), 'Dwight must now receive his own rule');
+  assert.equal(jim.includes('no-review-cto-pr'), false, 'and nobody else may');
+  assert.equal(god.includes('no-review-cto-pr'), false);
+
+  // The globals reach everyone, god included (md-140: no isGod exclusion).
+  for (const set of [jim, dwight, god]) {
+    assert.ok(set.includes('own-folder-only'));
+    assert.ok(set.includes('no-destructive-shared-state'));
+    assert.ok(set.includes('no-push-without-signoff'));
+    assert.ok(set.includes('triage-dont-self-authorize'));
+  }
+  assert.equal(jim.length, 4);
+  assert.equal(dwight.length, 5, 'Dwight carries the four globals plus his own');
 });
