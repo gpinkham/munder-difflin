@@ -94,6 +94,26 @@ import {
   withCodexRemoteArgs
 } from '../shared/codexRemote';
 
+// MD_USER_DATA — run a second instance beside the live one, on its own profile.
+// Electron derives userData from the app name, so a dev build and the installed app
+// share ~/Library/Application Support/munder-difflin: one config.json, one harness.db,
+// and one single-instance lock — which is why a second instance otherwise just exits
+// clean with no window. Point this at a directory and the WHOLE profile moves with it
+// (config, DB, knowledge store, Chromium state, the lock), so the installed app keeps
+// running untouched and the test instance opens whatever harnessHome its own config
+// names. Unset in normal use, so packaged behaviour is unchanged.
+//
+// This MUST stay the first statement in the file. Every userData consumer resolves the
+// path lazily inside a function (config.ts:490, db.ts:81, knowledge.ts:62), so setting
+// it here — before app-ready and before the first readConfig() — moves all of them; a
+// read that happened earlier would already have been answered from the default.
+if (process.env.MD_USER_DATA) {
+  const profileDir = resolve(expandTilde(process.env.MD_USER_DATA));
+  mkdirSync(profileDir, { recursive: true }); // setPath rejects a directory that isn't there
+  app.setPath('userData', profileDir);
+  console.log('[profile] MD_USER_DATA set — userData is', profileDir);
+}
+
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 
 // Keep the main process alive on an unexpected throw/rejection. The harness is a
