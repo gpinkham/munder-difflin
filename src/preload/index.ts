@@ -1367,6 +1367,16 @@ const api = {
    *  store is created at module load, so an async read would arrive after the
    *  first render and the floor would flash empty. One blocking round trip at
    *  boot. `null` = no file (or unreadable) — the caller then uses localStorage. */
+  /** Authority rules (md-146). `overview` is everything the Rules panel needs in
+   *  one call; `capPreview` answers "what would this look like if I saved?" so the
+   *  cap is visible while authoring rather than a refusal afterwards. */
+  rulesOverview: (): Promise<unknown> => ipcRenderer.invoke('rules:overview'),
+  rulesInEffect: (agentId: string): Promise<unknown> => ipcRenderer.invoke('rules:inEffect', agentId),
+  rulesCapPreview: (candidate?: unknown): Promise<unknown> => ipcRenderer.invoke('rules:capPreview', candidate),
+  rulesUpsert: (rule: unknown, expectedRev?: number): Promise<unknown> => ipcRenderer.invoke('rules:upsert', rule, expectedRev),
+  rulesRetire: (id: string, expectedRev?: number): Promise<unknown> => ipcRenderer.invoke('rules:retire', id, expectedRev),
+  rulesCaps: (): Promise<unknown> => ipcRenderer.invoke('rules:caps'),
+
   rosterReadSync: (): RosterSnapshot | null => {
     try { return ipcRenderer.sendSync('roster:readSync') ?? null; } catch { return null; }
   },

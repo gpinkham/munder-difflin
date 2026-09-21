@@ -480,3 +480,199 @@ test('the REAL hive store matches the locked schema and targets correctly', () =
   assert.equal(jim.length, 4);
   assert.equal(dwight.length, 5, 'Dwight carries the four globals plus his own');
 });
+
+// --- md-149 Phase 3: authoring ------------------------------------------
+
+const opts = (root, extra = {}) => ({ actor: 'gary', agentIds: ['jim', 'pam', 'god'], ...extra });
+
+test('authoring: upsert adds the rule, bumps rev, and renders to its targets', async () => {
+  const root = home({ store: { rev: 1, rules: [] } });
+  const { m } = mgr(root);
+  const res = await m.upsert({ id: 'r1', text: 'Write only to your own folder.', scope: { kind: 'global' } }, opts(root));
+  assert.equal(res.ok, true);
+  assert.equal(res.rev, 2, 'every write bumps the rev so render + notice fire');
+  assert.deepEqual(res.rendered.sort(), ['god', 'jim', 'pam']);
+  assert.match(read(root, 'jim'), /Write only to your own folder\./);
+  assert.match(read(root, 'god'), /rev 2/);
+});
+
+test('authoring: an agent-scoped rule renders only to the agents picked', async () => {
+  const root = home({ store: { rev: 1, rules: [] } });
+  const { m } = mgr(root);
+  await m.upsert({ id: 'r1', text: 'Only Jim and god.', scope: { kind: 'agents', ids: ['jim', 'god'] } }, opts(root));
+  assert.match(read(root, 'jim'), /Only Jim and god\./);
+  assert.match(read(root, 'god'), /Only Jim and god\./);
+  assert.equal(read(root, 'pam').includes('Only Jim and god.'), false);
+});
+
+test('authoring: god is targetable like any other agent (decision 5)', async () => {
+  const root = home({ store: { rev: 1, rules: [] } });
+  const { m } = mgr(root);
+  const res = await m.upsert({ id: 'god-only', text: 'Triage, do not self-authorize.', scope: { kind: 'agents', ids: ['god'] } }, opts(root));
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.rendered.sort(), ['god', 'jim', 'pam'], 'every agent re-renders; only god gains the rule');
+  assert.match(read(root, 'god'), /Triage, do not self-authorize\./);
+  assert.equal(read(root, 'jim').includes('Triage, do not self-authorize.'), false);
+});
+
+test('authoring: editing an existing id replaces rather than duplicates', async () => {
+  const root = home({ store: { rev: 1, rules: [] } });
+  const { m } = mgr(root);
+  await m.upsert({ id: 'r1', text: 'First wording.', scope: { kind: 'global' } }, opts(root));
+  const res = await m.upsert({ id: 'r1', text: 'Second wording.', scope: { kind: 'global' } }, opts(root));
+  assert.equal(res.ok, true);
+  const store = JSON.parse(fs.readFileSync(path.join(root, 'hive', 'policy', 'rules.json'), 'utf8'));
+  assert.equal(store.rules.filter((r) => r.id === 'r1').length, 1);
+  assert.match(read(root, 'jim'), /Second wording\./);
+  assert.equal(read(root, 'jim').includes('First wording.'), false);
+});
+
+test('authoring: retire tombstones the rule and drops it from the block', async () => {
+  const root = home({ store: { rev: 1, rules: [] } });
+  const { m } = mgr(root);
+  await m.upsert({ id: 'r1', text: 'Going away soon.', scope: { kind: 'global' } }, opts(root));
+  assert.match(read(root, 'jim'), /Going away soon\./);
+  const res = await m.retire('r1', opts(root));
+  assert.equal(res.ok, true);
+  assert.equal(read(root, 'jim').includes('Going away soon.'), false, 'dropped from the rendered block');
+  const store = JSON.parse(fs.readFileSync(path.join(root, 'hive', 'policy', 'rules.json'), 'utf8'));
+  const tomb = store.rules.find((r) => r.id === 'r1');
+  assert.equal(tomb.status, 'retired', 'kept in the store as a tombstone');
+  assert.ok(tomb.retired, 'with the date it was retired');
+});
+
+test('authoring: retiring an unknown or already-retired rule is refused', async () => {
+  const root = home({ store: { rev: 1, rules: [] } });
+  const { m } = mgr(root);
+  assert.equal((await m.retire('nope', opts(root))).reason, 'unknown-rule');
+  await m.upsert({ id: 'r1', text: 'x y z.', scope: { kind: 'global' } }, opts(root));
+  await m.retire('r1', opts(root));
+  assert.equal((await m.retire('r1', opts(root))).reason, 'already-retired');
+});
+
+test('authoring: every change appends a history row', async () => {
+  const root = home({ store: { rev: 1, rules: [] } });
+  const { m } = mgr(root);
+  await m.upsert({ id: 'r1', text: 'One.', scope: { kind: 'global' } }, opts(root));
+  await m.upsert({ id: 'r1', text: 'One, reworded.', scope: { kind: 'global' } }, opts(root));
+  await m.retire('r1', opts(root));
+  const rows = fs.readFileSync(path.join(root, 'hive', 'policy', 'rules-history.jsonl'), 'utf8')
+    .trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(rows.map((r) => r.op), ['add', 'edit', 'retire']);
+  assert.deepEqual(rows.map((r) => r.rev), [2, 3, 4]);
+  assert.ok(rows.every((r) => r.actor === 'gary' && r.ruleId === 'r1' && r.at));
+});
+
+test('authoring: a stale rev is refused rather than merged', async () => {
+  const root = home({ store: { rev: 1, rules: [] } });
+  const { m } = mgr(root);
+  await m.upsert({ id: 'r1', text: 'Landed first.', scope: { kind: 'global' } }, opts(root));   // rev -> 2
+  const res = await m.upsert({ id: 'r2', text: 'Second writer, stale read.', scope: { kind: 'global' } },
+    opts(root, { expectedRev: 1 }));
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, 'stale-rev');
+  assert.deepEqual(res.detail, { expected: 1, actual: 2 });
+  assert.equal(read(root, 'jim').includes('Second writer'), false, 'the stale write must not land');
+});
+
+test('authoring: text and id are required', async () => {
+  const root = home({ store: { rev: 1, rules: [] } });
+  const { m } = mgr(root);
+  assert.equal((await m.upsert({ id: 'x', text: '   ' }, opts(root))).reason, 'id-and-text-required');
+  assert.equal((await m.upsert({ id: '', text: 'ok' }, opts(root))).reason, 'id-and-text-required');
+});
+
+// --- the cap, enforced at authoring time -------------------------------
+
+test('cap: a save that would exceed the per-agent count is REFUSED', async () => {
+  const root = home({ store: { rev: 1, rules: [] } });
+  const { m } = mgr(root);
+  for (let i = 1; i <= 5; i++) {
+    const r = await m.upsert({ id: `r${i}`, text: `Rule number ${i}.`, scope: { kind: 'global' } }, opts(root));
+    assert.equal(r.ok, true, `rule ${i} should fit`);
+  }
+  const over = await m.upsert({ id: 'r6', text: 'One too many.', scope: { kind: 'global' } }, opts(root));
+  assert.equal(over.ok, false);
+  assert.equal(over.reason, 'over-cap');
+  assert.ok(over.detail.over.includes('jim'));
+  assert.equal(read(root, 'jim').includes('One too many.'), false);
+});
+
+test('cap: retiring one makes room again', async () => {
+  const root = home({ store: { rev: 1, rules: [] } });
+  const { m } = mgr(root);
+  for (let i = 1; i <= 5; i++) await m.upsert({ id: `r${i}`, text: `Rule number ${i}.`, scope: { kind: 'global' } }, opts(root));
+  assert.equal((await m.upsert({ id: 'r6', text: 'Blocked.', scope: { kind: 'global' } }, opts(root))).reason, 'over-cap');
+  await m.retire('r3', opts(root));
+  const now = await m.upsert({ id: 'r6', text: 'Fits now.', scope: { kind: 'global' } }, opts(root));
+  assert.equal(now.ok, true, 'the cap is a live budget, not a high-water mark');
+  assert.match(read(root, 'jim'), /Fits now\./);
+});
+
+test('cap: the per-agent TOKEN budget refuses a save too', async () => {
+  const root = home({ store: { rev: 1, rules: [] } });
+  const { m } = mgr(root);
+  const long = 'x '.repeat(600); // ~600 tokens by the chars/4 estimate, well past 250
+  const res = await m.upsert({ id: 'wordy', text: long, scope: { kind: 'global' } }, opts(root));
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, 'over-cap');
+});
+
+test('cap: a scoped rule only counts against the agents it targets', async () => {
+  const root = home({ store: { rev: 1, rules: [] } });
+  const { m } = mgr(root);
+  for (let i = 1; i <= 5; i++) await m.upsert({ id: `j${i}`, text: `Jim rule ${i}.`, scope: { kind: 'agents', ids: ['jim'] } }, opts(root));
+  const rep = m.capReport(['jim', 'pam']);
+  assert.equal(rep.perAgent.jim.count, 5);
+  assert.equal(rep.perAgent.pam.count, 0);
+  // Pam has room even though Jim is full.
+  const res = await m.upsert({ id: 'p1', text: 'Pam rule.', scope: { kind: 'agents', ids: ['pam'] } }, opts(root));
+  assert.equal(res.ok, true);
+});
+
+test('capReport previews a candidate WITHOUT saving it', async () => {
+  const root = home({ store: { rev: 1, rules: [] } });
+  const { m } = mgr(root);
+  const before = m.capReport(['jim']);
+  const withDraft = m.capReport(['jim'], { id: 'draft', text: 'A candidate rule.', scope: { kind: 'global' }, status: 'active' });
+  assert.equal(before.perAgent.jim.count, 0);
+  assert.equal(withDraft.perAgent.jim.count, 1, 'the preview shows the number moving');
+  const store = JSON.parse(fs.readFileSync(path.join(root, 'hive', 'policy', 'rules.json'), 'utf8'));
+  assert.equal(store.rules.length, 0, 'previewing must not write');
+});
+
+// --- what the panel and the agent modal read --------------------------
+
+test('overview gives the panel targeting, caps and delivery state in one call', async () => {
+  const root = home({ store: { rev: 1, rules: [] } });
+  const { m } = mgr(root);
+  await m.upsert({ id: 'g', text: 'Everyone.', scope: { kind: 'global' } }, opts(root));
+  await m.upsert({ id: 'j', text: 'Jim only.', scope: { kind: 'agents', ids: ['jim'] } }, opts(root));
+  m.takeNotice('jim');
+  const o = m.overview(['jim', 'pam', 'god']);
+  assert.equal(o.active, true);
+  assert.equal(o.rev, 3);
+  assert.deepEqual(o.targets.g.sort(), ['god', 'jim', 'pam']);
+  assert.deepEqual(o.targets.j, ['jim']);
+  assert.equal(o.caps.perAgent.jim.count, 2);
+  assert.equal(o.caps.perAgent.pam.count, 1);
+  assert.equal(o.deliveredRevs.jim, 3);
+  assert.equal(o.deliveredRevs.pam, null, 'pam has not been told yet');
+});
+
+test('inEffect is the read-only per-agent view', async () => {
+  const root = home({ store: { rev: 1, rules: [] } });
+  const { m } = mgr(root);
+  await m.upsert({ id: 'g', text: 'Everyone.', scope: { kind: 'global' } }, opts(root));
+  await m.upsert({ id: 'j', text: 'Jim only.', scope: { kind: 'agents', ids: ['jim'] } }, opts(root));
+  assert.deepEqual(m.inEffect('jim').rules.map((r) => r.id).sort(), ['g', 'j']);
+  assert.deepEqual(m.inEffect('pam').rules.map((r) => r.id), ['g']);
+  assert.equal(m.inEffect('jim').rev, 3);
+});
+
+test('authoring is dormant with no store', async () => {
+  const root = home({ store: null });
+  const { m } = mgr(root);
+  assert.equal((await m.upsert({ id: 'x', text: 'y z.' }, opts(root))).reason, 'dormant');
+  assert.equal((await m.retire('x', opts(root))).reason, 'dormant');
+});

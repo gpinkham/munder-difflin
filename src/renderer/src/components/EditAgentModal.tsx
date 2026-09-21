@@ -1,6 +1,7 @@
 import { useEffect, useState, type CSSProperties } from 'react';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
+import { RulesInEffect } from './RulesPanel';
 import { SpritePortrait } from './SpritePortrait';
 import { ProviderLogo } from './ProviderLogo';
 import { useStore, type Agent } from '@/store/store';
@@ -276,6 +277,15 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
                   style={{ ...inputStyle, fontFamily: 'var(--cth-font-ui)', resize: 'vertical', minHeight: 200 }}
                 />
               </Row>
+            </Section>
+
+            {/* md-146 — the rules in effect for this agent, READ-ONLY. An agent's
+                standing context is its goal PLUS the rules that target it, so the
+                briefing editor is the right place to SHOW them; authoring stays in
+                Settings → Rules so a rule cannot be edited from two surfaces with
+                different ideas of the cap. */}
+            <Section label="Authority rules" hint="rendered automatically · edit in Settings → Rules">
+              <RulesInEffect agentId={agent.id} />
             </Section>
               </div>
             </div>

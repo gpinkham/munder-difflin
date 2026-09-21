@@ -62,7 +62,7 @@ import { IntegrationBroker } from './integrationBroker';
 import * as integrations from './integrations';
 import { validateBaseUrl, buildAuthHeaders, resolveUpstreamUrl, secretRefFor, INTEGRATION_TEMPLATES } from '../shared/integrations';
 import { RosterStore } from './roster';
-import { RulesManager } from './rules';
+import { RulesManager, RULE_CAPS } from './rules';
 import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog, type WorkerWakeFacts } from './workerWake';
@@ -3460,6 +3460,38 @@ ipcMain.handle('git:checkout', async (_evt, cwd: unknown, ref: unknown, detach: 
 // (`roster` itself is constructed earlier so HookServer can read standing goals.)
 ipcMain.on('roster:readSync', (evt) => { evt.returnValue = roster.read(); });
 ipcMain.on('config:homeSync', (evt) => { evt.returnValue = readConfig().harnessHome ?? null; });
+// ─── IPC: authority rules (md-146 Phase 3 — the Rules panel) ────────────────
+// The roster is the source of who exists, so every call takes the agent-id list
+// from it rather than the renderer: a panel that can name an agent the hive does
+// not have would render rules to nobody.
+function rulesAgentIds(): string[] {
+  const snap = roster.read();
+  const ids = Array.isArray(snap?.agents)
+    ? (snap!.agents as Array<{ id?: unknown; archived?: unknown }>)
+      .filter((a) => a && typeof a.id === 'string' && !a.archived)
+      .map((a) => a.id as string)
+    : [];
+  return ids;
+}
+ipcMain.handle('rules:overview', () => rules.overview(rulesAgentIds()));
+ipcMain.handle('rules:inEffect', (_evt, agentId: unknown) =>
+  typeof agentId === 'string' ? rules.inEffect(agentId) : null);
+ipcMain.handle('rules:capPreview', (_evt, candidate: unknown) =>
+  rules.capReport(rulesAgentIds(), (candidate ?? undefined) as never));
+ipcMain.handle('rules:upsert', (_evt, rule: unknown, expectedRev: unknown) =>
+  rules.upsert(rule as never, {
+    actor: 'user', agentIds: rulesAgentIds(),
+    expectedRev: typeof expectedRev === 'number' ? expectedRev : undefined
+  }));
+ipcMain.handle('rules:retire', (_evt, id: unknown, expectedRev: unknown) =>
+  typeof id === 'string'
+    ? rules.retire(id, {
+      actor: 'user', agentIds: rulesAgentIds(),
+      expectedRev: typeof expectedRev === 'number' ? expectedRev : undefined
+    })
+    : { ok: false, reason: 'id-required' });
+ipcMain.handle('rules:caps', () => RULE_CAPS);
+
 ipcMain.handle('roster:read', () => roster.read());
 ipcMain.handle('roster:write', (_evt, snap: unknown) => roster.write(snap));
 

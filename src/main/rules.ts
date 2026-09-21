@@ -200,6 +200,10 @@ export class RulesManager {
     const d = this.policyDir();
     return d ? join(d, 'rules.json') : null;
   }
+  historyPath(): string | null {
+    const d = this.policyDir();
+    return d ? join(d, 'rules-history.jsonl') : null;
+  }
   deliveryPath(): string | null {
     const d = this.policyDir();
     return d ? join(d, 'rules-delivery.json') : null;
@@ -502,6 +506,186 @@ export class RulesManager {
     this.saveDelivery(all);
     this.log({ kind: 'rules-delivery', agentId, rev: store.rev, notified: true, first: isFirst });
     return lines.join('\n');
+  }
+
+
+  // — authoring (Phase 3) —
+
+  /**
+   * Rough token estimate for the cap display. Chars/4 is the usual approximation
+   * and it is deliberately not precise: the cap is an alignment mechanism, so
+   * "you are near the limit" is the useful signal, not a figure to the token.
+   */
+  static estimateTokens(text: string): number {
+    return Math.ceil(text.trim().length / 4);
+  }
+
+  /**
+   * Per-agent and global budget against RULE_CAPS, for the authoring UI.
+   *
+   * `candidate` lets the panel ask "what would this look like if I saved?" before
+   * committing, which is the whole point of enforcing the cap at authoring time:
+   * a human can see the number move and retire something, instead of being
+   * refused after writing the rule.
+   */
+  capReport(agentIds: string[], candidate?: Rule): {
+    global: { count: number; tokens: number; max: number; maxTokens: number; over: boolean };
+    perAgent: Record<string, { count: number; tokens: number; max: number; maxTokens: number; over: boolean }>;
+    over: string[];
+  } {
+    const store = this.read();
+    let rules = store?.rules ?? [];
+    if (candidate) {
+      rules = [...rules.filter((r) => r.id !== candidate.id), candidate];
+    }
+    const active = rules.filter((r) => (r.status ?? 'active') === 'active');
+    const gTokens = active.reduce((n, r) => n + RulesManager.estimateTokens(r.text), 0);
+    const global = {
+      count: active.length, tokens: gTokens,
+      max: RULE_CAPS.globalMax, maxTokens: RULE_CAPS.globalMaxTokens,
+      over: active.length > RULE_CAPS.globalMax || gTokens > RULE_CAPS.globalMaxTokens
+    };
+    const perAgent: Record<string, { count: number; tokens: number; max: number; maxTokens: number; over: boolean }> = {};
+    const over: string[] = [];
+    if (global.over) over.push('global');
+    for (const id of agentIds) {
+      const mine = this.rulesFor(id, active);
+      const tokens = mine.reduce((n, r) => n + RulesManager.estimateTokens(r.text), 0);
+      const entry = {
+        count: mine.length, tokens,
+        max: RULE_CAPS.perAgentMax, maxTokens: RULE_CAPS.perAgentMaxTokens,
+        over: mine.length > RULE_CAPS.perAgentMax || tokens > RULE_CAPS.perAgentMaxTokens
+      };
+      perAgent[id] = entry;
+      if (entry.over) over.push(id);
+    }
+    return { global, perAgent, over };
+  }
+
+  private appendHistory(row: Record<string, unknown>): void {
+    const p = this.historyPath();
+    if (!p) return;
+    try {
+      mkdirSync(join(p, '..'), { recursive: true });
+      // Append, never rewrite. A bad rule is only traceable if the trail is intact.
+      writeFileSync(p, JSON.stringify({ at: new Date().toISOString(), ...row }) + '\n', { flag: 'a' });
+    } catch { /* history is best-effort; it must not block a write */ }
+  }
+
+  /** Write the store with the rev bumped, atomically. */
+  private commit(rules: Rule[], rev: number): boolean {
+    const p = this.storePath();
+    if (!p) return false;
+    const existing = readJson<RulesFile>(p) ?? {};
+    const next = { ...existing, rev, rules };
+    try { atomicWrite(p, JSON.stringify(next, null, 2) + '\n'); return true; } catch { return false; }
+  }
+
+  /** Agents a rule reaches, given the roster to resolve `global` against. */
+  private targetsOf(rule: Rule, agentIds: string[]): string[] {
+    return agentIds.filter((id) => this.targets(rule, id) === true);
+  }
+
+  /**
+   * Add or replace a rule, bump the rev, record history, and render the agents it
+   * reaches. Rejects an over-cap save and a stale write.
+   *
+   * `expectedRev` is optimistic concurrency: the panel sends back the rev it read,
+   * and a mismatch is refused rather than merged. Two writers on one small file is
+   * exactly where a silent overwrite happens, and the panel can reload and
+   * re-present far more cheaply than anyone can reconstruct a lost rule.
+   */
+  async upsert(rule: Rule, opts: { actor: string; agentIds: string[]; expectedRev?: number }): Promise<{ ok: true; rev: number; rendered: string[] } | { ok: false; reason: string; detail?: unknown }> {
+    if (!this.active) return { ok: false, reason: 'dormant' };
+    const store = this.read();
+    if (!store) return { ok: false, reason: 'store-unreadable' };
+    if (opts.expectedRev !== undefined && opts.expectedRev !== store.rev) {
+      return { ok: false, reason: 'stale-rev', detail: { expected: opts.expectedRev, actual: store.rev } };
+    }
+    if (!rule.id || !rule.text?.trim()) return { ok: false, reason: 'id-and-text-required' };
+
+    const candidate: Rule = {
+      ...rule,
+      text: rule.text.trim(),
+      status: rule.status ?? 'active',
+      added_by: rule.added_by ?? opts.actor,
+      added: rule.added ?? new Date().toISOString().slice(0, 10)
+    };
+    const cap = this.capReport(opts.agentIds, candidate);
+    if (cap.over.length) return { ok: false, reason: 'over-cap', detail: cap };
+
+    const existed = store.rules.some((r) => r.id === candidate.id);
+    const rules = [...store.rules.filter((r) => r.id !== candidate.id), candidate];
+    const rev = store.rev + 1;
+    if (!this.commit(rules, rev)) return { ok: false, reason: 'write-failed' };
+    this.appendHistory({ rev, actor: opts.actor, op: existed ? 'edit' : 'add', ruleId: candidate.id });
+    this.log({ kind: 'rules-authored', rev, actor: opts.actor, op: existed ? 'edit' : 'add', ruleId: candidate.id });
+
+    const rendered: string[] = [];
+    for (const id of opts.agentIds) {
+      const out = await this.renderFor(id);
+      if (out.ok) rendered.push(id);
+    }
+    return { ok: true, rev, rendered };
+  }
+
+  /**
+   * Retire a rule: a TOMBSTONE in the store, dropped from every rendered block.
+   *
+   * Never a silent removal. A rule that simply vanishes leaves the next reader
+   * noticing a gap and re-opening the question it settled; the tombstone is what
+   * makes the decision legible later.
+   */
+  async retire(id: string, opts: { actor: string; agentIds: string[]; expectedRev?: number }): Promise<{ ok: true; rev: number; rendered: string[] } | { ok: false; reason: string; detail?: unknown }> {
+    if (!this.active) return { ok: false, reason: 'dormant' };
+    const store = this.read();
+    if (!store) return { ok: false, reason: 'store-unreadable' };
+    if (opts.expectedRev !== undefined && opts.expectedRev !== store.rev) {
+      return { ok: false, reason: 'stale-rev', detail: { expected: opts.expectedRev, actual: store.rev } };
+    }
+    const target = store.rules.find((r) => r.id === id);
+    if (!target) return { ok: false, reason: 'unknown-rule' };
+    if ((target.status ?? 'active') === 'retired') return { ok: false, reason: 'already-retired' };
+
+    const rules = store.rules.map((r) => r.id === id
+      ? { ...r, status: 'retired' as const, retired: new Date().toISOString().slice(0, 10) }
+      : r);
+    const rev = store.rev + 1;
+    if (!this.commit(rules, rev)) return { ok: false, reason: 'write-failed' };
+    this.appendHistory({ rev, actor: opts.actor, op: 'retire', ruleId: id });
+    this.log({ kind: 'rules-authored', rev, actor: opts.actor, op: 'retire', ruleId: id });
+
+    const rendered: string[] = [];
+    for (const aid of opts.agentIds) {
+      const out = await this.renderFor(aid);
+      if (out.ok) rendered.push(aid);
+    }
+    return { ok: true, rev, rendered };
+  }
+
+  /** Everything the panel needs in one call: store, per-agent targeting, caps. */
+  overview(agentIds: string[]): {
+    active: boolean; rev: number; rules: Rule[];
+    targets: Record<string, string[]>;
+    caps: ReturnType<RulesManager['capReport']>;
+    deliveredRevs: Record<string, number | null>;
+  } {
+    const store = this.read();
+    const rules = store?.rules ?? [];
+    const targets: Record<string, string[]> = {};
+    for (const r of rules) targets[r.id] = this.targetsOf(r, agentIds);
+    const deliveredRevs: Record<string, number | null> = {};
+    for (const id of agentIds) deliveredRevs[id] = this.deliveredRev(id);
+    return {
+      active: this.active, rev: store?.rev ?? 0, rules,
+      targets, caps: this.capReport(agentIds), deliveredRevs
+    };
+  }
+
+  /** The rules in effect for one agent — the read-only per-agent view. */
+  inEffect(agentId: string): { rev: number; rules: Rule[]; deliveredRev: number | null } {
+    const store = this.read();
+    return { rev: store?.rev ?? 0, rules: this.rulesFor(agentId, store?.rules ?? []), deliveredRev: this.deliveredRev(agentId) };
   }
 
   /** Read-only view for an operator answering "did agent X get rule N?". */
