@@ -89,7 +89,12 @@ export class HookServer {
     /** Optional observer of every hook boundary (agentId, event, message). The
      *  worker inbox-wake watchdog (workerWake.ts) feeds on this to learn when an
      *  agent is parked on a permission/HITL prompt so it never types into it. */
-    private onEvent?: (agentId: string | undefined, event: string, message: string | undefined) => void
+    private onEvent?: (agentId: string | undefined, event: string, message: string | undefined) => void,
+    /** md-146 rules notice. Returns a one-off diff for an agent that has not yet
+     *  been told about the current rule revision, or null. Keyed on REVISION and
+     *  persisted to disk, so unlike the standing goal it neither decays after a
+     *  compact nor re-spams after a restart. Optional: no rules store, no notice. */
+    private takeRulesNotice?: (agentId: string) => string | null
   ) {}
 
   start(): void {
@@ -388,12 +393,21 @@ export class HookServer {
       }
     }
 
-    if (steer || roster || goal) {
+    // Rules notice (md-146 §4) — rides the same channel as the goal rather than
+    // replacing it. Deliberately NOT keyed on session: that is the md-138 bug,
+    // where a once-per-session injection quietly stops arriving after the first
+    // compaction. This is keyed on the rule revision and recorded on disk, so it
+    // fires once per change per agent and survives a restart.
+    const rulesNotice = (event === 'SessionStart' || event === 'UserPromptSubmit') && agentId
+      ? (this.takeRulesNotice?.(agentId) ?? null)
+      : null;
+
+    if (steer || roster || goal || rulesNotice) {
       this.emit(agentId, event, p);
       return {
         hookSpecificOutput: {
           hookEventName: event,
-          additionalContext: [roster, goal, steer].filter(Boolean).join('\n\n')
+          additionalContext: [roster, goal, rulesNotice, steer].filter(Boolean).join('\n\n')
         }
       };
     }

@@ -62,6 +62,7 @@ import { IntegrationBroker } from './integrationBroker';
 import * as integrations from './integrations';
 import { validateBaseUrl, buildAuthHeaders, resolveUpstreamUrl, secretRefFor, INTEGRATION_TEMPLATES } from '../shared/integrations';
 import { RosterStore } from './roster';
+import { RulesManager } from './rules';
 import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog, type WorkerWakeFacts } from './workerWake';
@@ -296,6 +297,17 @@ function standingGoalFromRoster(agentId: string): string | null {
 const workerWake = new WorkerWakeWatchdog();
 // HookServer needs BOTH: Oscar's control registry (HITL pause/gate/steer/halt via
 // hook returns) AND Jim's breaker (feed recordToolUse on each PostToolUse).
+/** How often the rules reconcile pass runs. Long on purpose: it is a backstop,
+ *  not the delivery path — the condenser and every store change render directly. */
+const RULES_RECONCILE_MS = 15 * 60 * 1000;
+// md-146 Phase 1 — renders the authority-rule store into each targeted agent's
+// pinned memory block and tells the agent what changed. Dormant with no
+// <harnessHome>/hive/policy/rules.json: nothing rendered, logged or notified.
+const rules = new RulesManager(
+  () => readConfig().harnessHome,
+  (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } }
+);
+
 const hookServer = new HookServer(
   hive,
   () => liveWebContents(),
@@ -303,7 +315,8 @@ const hookServer = new HookServer(
   control,
   breaker,
   standingGoalFromRoster,
-  (agentId, event, message) => workerWake.noteHook(agentId, event, message)
+  (agentId, event, message) => workerWake.noteHook(agentId, event, message),
+  (agentId) => rules.takeNotice(agentId)
 );
 const memory = new MemoryManager(
   () => readConfig().harnessHome,
@@ -331,7 +344,8 @@ const reflector = new MemoryReflector(
   () => readConfig().defaultCommand ?? 'claude',
   () => memory.env(),
   reflectSettings,
-  (event) => { try { hive.appendLog(event); } catch { /* best-effort */ } }
+  (event) => { try { hive.appendLog(event); } catch { /* best-effort */ } },
+  rules
 );
 // Durable harness state (SQLite, main process). Phase A: window bounds (kv) +
 // net-new command history. Opened in whenReady, closed in the teardown blocks.
@@ -5090,6 +5104,13 @@ function bootstrapHiveServices(): void {
   // reply still belongs in the history.
   if ((readConfig().webhookTriggers ?? []).length > 0) startWebhookDoneObserver();
   hookServer.start();
+  // md-146 §3.3 — the self-healing backstop. A condense that dropped the managed
+  // block, a write that failed, or an app killed mid-render all leave a file
+  // behind the store; reconcile compares the rendered rev against the current one
+  // and re-renders the difference. It is what makes "the rules reliably land" a
+  // property rather than a hope. No-ops entirely when there is no rules store.
+  void rules.reconcile().catch(() => undefined);
+  setInterval(() => { void rules.reconcile().catch(() => undefined); }, RULES_RECONCILE_MS).unref();
   // Bind the telemetry collector BEFORE the renderer spawns any agent, then point
   // the hive at it so every subsequent spawn is instrumented. Best-effort — a bind
   // failure just leaves telemetry off (transcript reconciler stays). No breaker.start():

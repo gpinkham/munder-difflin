@@ -111,7 +111,10 @@ export class MemoryReflector {
     private getCommand: () => string,
     private getMemoryEnv: () => Record<string, string>,
     private getSettings: () => ReflectSettings,
-    private appendLog: (event: Record<string, unknown>) => void
+    private appendLog: (event: Record<string, unknown>) => void,
+    /** md-146 render layer. Optional so a harness without a rules store — and
+     *  every existing test that constructs this manager — behaves as before. */
+    private rules?: { active: boolean; writeMemoryFile: (agentId: string, mutate: (t: string) => { ok: true; text: string; action: string } | { ok: false; reason: string }) => Promise<unknown>; renderFor: (agentId: string) => Promise<unknown> }
   ) {}
 
   // — lifecycle (mirrors MemoryManager) —
@@ -234,8 +237,19 @@ export class MemoryReflector {
     }
 
     // 5) ATOMIC SWAP — write a temp sibling, fsync, rename over the original.
+    //
+    // Routed through the rules render layer's per-agent serializer when one is
+    // present, so the condenser and the renderer are ONE writer on this file
+    // rather than two racing ones. With no rules store the direct write is used,
+    // which is byte-for-byte the previous behaviour.
     try {
-      atomicWrite(mem, rebuilt);
+      if (this.rules?.active) {
+        const res = await this.rules.writeMemoryFile(id, () => ({ ok: true, text: rebuilt, action: 'condensed' }));
+        const okRes = res as { ok?: boolean; reason?: string } | undefined;
+        if (okRes && okRes.ok === false) throw new Error(okRes.reason ?? 'serialized-write-failed');
+      } else {
+        atomicWrite(mem, rebuilt);
+      }
     } catch (e) {
       this.logAbort(id, 'swap-failed', String(e), { oldBytes, newBytes });
       return { id, condensed: false, reason: 'swap-failed', oldBytes, newBytes };
@@ -247,6 +261,15 @@ export class MemoryReflector {
         evicted: evict.length, kept: keep.length, hoisted: summary.hoist.length, backup
       });
     } catch { /* logging is best-effort */ }
+
+    // 6) RE-ASSERT THE MANAGED RULES BLOCK — last step, on purpose. The rewrite
+    // above rebuilds the pinned region from its non-empty lines, so re-rendering
+    // here closes the window where a condense could drop or reflow the block.
+    // Cheap, and it makes the common case self-correcting without waiting for the
+    // periodic reconcile.
+    if (this.rules?.active) {
+      try { await this.rules.renderFor(id); } catch { /* reconcile is the backstop */ }
+    }
     // The miner re-indexes within its next cycle — mtime changed, no extra wiring.
     return { id, condensed: true, reason: 'condensed', oldBytes, newBytes };
   }
