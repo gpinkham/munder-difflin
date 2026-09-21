@@ -36,14 +36,25 @@ interface Overview {
   deliveredRevs: Record<string, number | null>;
 }
 
-const bridge = () => (window as unknown as {
-  api?: {
-    rulesOverview?: () => Promise<Overview>;
-    rulesCapPreview?: (c?: unknown) => Promise<Overview['caps']>;
-    rulesUpsert?: (r: unknown, rev?: number) => Promise<{ ok: boolean; reason?: string; rev?: number; rendered?: string[]; detail?: unknown }>;
-    rulesRetire?: (id: string, rev?: number) => Promise<{ ok: boolean; reason?: string; rev?: number; rendered?: string[] }>;
-  };
-}).api;
+/** The preload bridge is `window.cth` — the name `contextBridge.exposeInMainWorld`
+ *  actually registers (`src/preload/index.ts:1439`), typed as `CthApi` in
+ *  `src/preload/index.d.ts`. Reaching for it through a hand-written
+ *  `window as unknown as { api?: … }` cast is what shipped this panel with an
+ *  eternal "Loading rules…": the cast invents a global that does not exist, so every
+ *  call optional-chained away to `undefined` and no error was ever thrown. Go through
+ *  the declared global so the compiler checks both the name and the methods; only the
+ *  RESULT is cast, because the preload types these channels as `Promise<unknown>`. */
+type UpsertResult = { ok: boolean; reason?: string; rev?: number; rendered?: string[]; detail?: unknown };
+type RetireResult = { ok: boolean; reason?: string; rev?: number; rendered?: string[] };
+
+const rulesApi = {
+  overview: () => window.cth.rulesOverview() as Promise<Overview>,
+  capPreview: (c: unknown) => window.cth.rulesCapPreview(c) as Promise<Overview['caps']>,
+  upsert: (r: unknown, rev?: number) => window.cth.rulesUpsert(r, rev) as Promise<UpsertResult>,
+  retire: (id: string, rev?: number) => window.cth.rulesRetire(id, rev) as Promise<RetireResult>,
+  inEffect: (id: string) =>
+    window.cth.rulesInEffect(id) as Promise<{ rev: number; rules: Rule[]; deliveredRev: number | null } | null>
+};
 
 const slug = (s: string): string =>
   s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
@@ -76,12 +87,16 @@ export function RulesPanel() {
     [agents]
   );
 
+  /** A load that produces neither an overview nor an error would leave the panel on
+   *  "Loading rules…" for ever, so treat an absent reply as a failure in its own
+   *  right rather than as "still waiting". */
   const load = useCallback(async () => {
     try {
-      const o = await bridge()?.rulesOverview?.();
-      setOv(o ?? null);
+      const o = await rulesApi.overview();
+      if (!o) { setOv(null); setErr('the main process returned no rules overview'); return; }
+      setOv(o);
       setErr(null);
-    } catch (e) { setErr(String(e)); }
+    } catch (e) { setOv(null); setErr(e instanceof Error ? e.message : String(e)); }
   }, []);
   useEffect(() => { void load(); }, [load]);
 
@@ -99,7 +114,7 @@ export function RulesPanel() {
     if (!text.trim()) { setPreview(null); return; }
     void (async () => {
       try {
-        const c = await bridge()?.rulesCapPreview?.(draftRule());
+        const c = await rulesApi.capPreview(draftRule());
         if (!cancelled) setPreview(c ?? null);
       } catch { /* preview is advisory */ }
     })();
@@ -113,7 +128,7 @@ export function RulesPanel() {
     if (!globalScope && !picked.length) { setErr('Pick at least one agent, or make the rule global.'); return; }
     setBusy(true); setErr(null); setNote(null);
     try {
-      const res = await bridge()?.rulesUpsert?.(draftRule(), ov?.rev);
+      const res = await rulesApi.upsert(draftRule(), ov?.rev);
       if (!res?.ok) {
         setErr(res?.reason === 'over-cap'
           ? 'Over the cap. Retire a rule before adding another — the cap is there to keep each rule salient.'
@@ -132,7 +147,7 @@ export function RulesPanel() {
   const retire = async (id: string) => {
     setBusy(true); setErr(null); setNote(null);
     try {
-      const res = await bridge()?.rulesRetire?.(id, ov?.rev);
+      const res = await rulesApi.retire(id, ov?.rev);
       if (!res?.ok) { setErr(`Could not retire: ${res?.reason ?? 'unknown'}`); return; }
       setNote(`Retired at rev ${res.rev}. Kept in the store as a tombstone, dropped from every rendered block.`);
       await load();
@@ -338,8 +353,7 @@ export function RulesInEffect({ agentId }: { agentId: string }) {
     let cancelled = false;
     void (async () => {
       try {
-        const api = (window as unknown as { api?: { rulesInEffect?: (id: string) => Promise<{ rev: number; rules: Rule[]; deliveredRev: number | null } | null> } }).api;
-        const d = await api?.rulesInEffect?.(agentId);
+        const d = await rulesApi.inEffect(agentId);
         if (!cancelled) setData(d ?? null);
       } catch { /* absent bridge = feature off */ }
     })();
