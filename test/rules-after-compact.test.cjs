@@ -231,6 +231,21 @@ test('SessionStart(compact) after PostCompact: rules arrive once', () => {
   assert.doesNotMatch(context(fire('UserPromptSubmit')), FULL);
 });
 
+test('an inert rule is re-delivered with its note', () => {
+  const { fire } = harness({ store: store(1, [
+    { id: 'inert', text: 'Template-only rule.', scope: { kind: 'global' }, status: 'active',
+      inertHere: true, note: 'INERT in this hive: carry on normally.' },
+    { id: 'bare-inert', text: 'Inert without a note.', scope: { kind: 'global' }, status: 'active', inertHere: true },
+    { id: 'live', text: 'Live rule.', scope: { kind: 'global' }, status: 'active', note: 'Not shown: this rule is live.' }
+  ]) });
+  fire('PreCompact');
+  fire('PostCompact');
+  const after = context(fire('UserPromptSubmit'));
+  assert.match(after, /Template-only rule\.\n {4}↳ INERT in this hive: carry on normally\./);
+  assert.match(after, /Inert without a note\.\n {4}↳ Inert on this instance/);
+  assert.doesNotMatch(after, /Not shown/, 'only inert rules carry the note');
+});
+
 test('re-delivery is logged so an operator can see it happened', () => {
   const { fire, rows } = harness();
   fire('PreCompact');

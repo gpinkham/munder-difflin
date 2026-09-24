@@ -74,6 +74,10 @@ export interface Rule {
   added_by?: string;
   added?: string;
   retired?: string;
+  /** The rule is carried as a template but does not apply on this instance. */
+  inertHere?: boolean;
+  /** Why it is inert, and what to do instead. Rendered only for inert rules. */
+  note?: string;
 }
 
 export interface RulesFile {
@@ -285,6 +289,9 @@ export class RulesManager {
     if (!rules.length) out.push('_(no rules apply to you at this revision)_');
     rules.forEach((r, i) => {
       out.push(`(${i + 1}) ${r.text}`);
+      // An inert rule without its explanation reads as an order, and the agent
+      // asks the question the note already answers — after every compaction.
+      if (r.inertHere) out.push(`    ↳ ${r.note ?? 'Inert on this instance: it does not apply here.'}`);
     });
     out.push(END_MARKER);
     return out.join('\n');
