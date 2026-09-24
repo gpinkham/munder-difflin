@@ -88,3 +88,13 @@ test('goal delivery state is isolated per agent', () => {
   assert.match(context(fire('UserPromptSubmit', 'session-1', 'pam-1')), /Ship the release safely/);
   assert.equal(context(fire('UserPromptSubmit', 'session-1', 'jim-1')), '');
 });
+
+test('a compaction re-delivers the goal even though the session id is unchanged (md-138)', () => {
+  const { fire } = harness();
+  assert.match(context(fire('SessionStart')), /Ship the release safely/);
+  assert.equal(context(fire('UserPromptSubmit')), '');
+
+  fire('PostCompact');
+  assert.match(context(fire('UserPromptSubmit')), /Ship the release safely/);
+  assert.equal(context(fire('UserPromptSubmit')), '');
+});

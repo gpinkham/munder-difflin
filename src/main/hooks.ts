@@ -283,6 +283,9 @@ export class HookServer {
     if (event === 'PreCompact' && agentId) this.breaker?.recordCompactStart(agentId);
     if ((event === 'PostCompact' || event === 'SessionStart') && agentId) {
       this.breaker?.recordCompactEnd(agentId);
+      // A compact keeps the session id (md-138), so the once-per-session goal
+      // would otherwise never come back. Forget it; the next prompt re-delivers.
+      this.deliveredGoalByAgent.delete(agentId);
     }
 
     if ((event === 'Stop' || event === 'SubagentStop') && agentId) {
