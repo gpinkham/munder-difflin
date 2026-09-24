@@ -183,6 +183,21 @@ test('an unreadable store mid-edit does not lose the re-delivery', () => {
   assert.doesNotMatch(context(fire('UserPromptSubmit')), FULL, 'and only once');
 });
 
+test('an app restart after a compaction: the resumed session gets the rules once', () => {
+  const before = harness();
+  before.fire('SessionStart');
+  before.fire('PostCompact');
+  // The app restarts before the next prompt: a new HookServer, the mark gone.
+  const { fire } = harness();
+  assert.match(context(fire('SessionStart', { source: 'resume' })), FULL);
+  assert.doesNotMatch(context(fire('UserPromptSubmit')), FULL);
+});
+
+test('a fresh startup session does not get the post-compact set', () => {
+  const { fire } = harness();
+  assert.doesNotMatch(context(fire('SessionStart', { source: 'startup' })), FULL);
+});
+
 test('re-delivery is logged so an operator can see it happened', () => {
   const { fire, rows } = harness();
   fire('PostCompact');

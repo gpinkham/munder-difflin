@@ -69,9 +69,11 @@ export class HookServer {
    *  agent has one live session, and a new session id replaces the old entry. */
   private deliveredGoalByAgent = new Map<string, { sessionId: string | null; goal: string | null }>();
   /** Agents compacted since their rules were last put back in context (md-197).
-   *  Set on PostCompact, drained by the next hook that can carry context. In
-   *  memory on purpose: an app restart starts a fresh session, and SessionStart
-   *  delivers the managed block through memory.md anyway. */
+   *  Set on PostCompact, drained by the next hook that can carry context. Lost on
+   *  an app restart, and that is covered without saving it: a restarted agent
+   *  resumes its (possibly compacted) session, and SessionStart source=resume
+   *  arms the re-delivery again. Nothing reaches the agent from memory.md unless
+   *  it chooses to read the file, so memory.md is not the backstop. */
   private rulesDueAfterCompact = new Set<string>();
 
   /** Opt-in authority policy (policy.ts). Built on first use so a harness with no
@@ -298,8 +300,11 @@ export class HookServer {
     }
     // md-197: the compaction summary keeps only what the agent chose to carry,
     // so the rules go back in on the next hook that can carry context. Also
-    // armed by SessionStart source=compact, should Claude Code ever send one.
-    if (agentId && (event === 'PostCompact' || (event === 'SessionStart' && p.source === 'compact'))) {
+    // armed by SessionStart source=compact, should Claude Code ever send one,
+    // and source=resume: a resume rebuilds context from a transcript that may
+    // have been compacted, and it is how an agent comes back after an app restart.
+    if (agentId && (event === 'PostCompact'
+      || (event === 'SessionStart' && (p.source === 'compact' || p.source === 'resume')))) {
       this.rulesDueAfterCompact.add(agentId);
     }
 
