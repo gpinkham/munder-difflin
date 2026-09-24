@@ -423,10 +423,13 @@ export class HookServer {
     // Full rule set after a compaction (md-197) — once per compaction, on the
     // first hook that can carry context. PostToolUse counts: an agent that
     // auto-compacts mid-task may not see another prompt for a long time.
+    // The mark clears only on an actual delivery: a rules.json caught mid-edit
+    // reads as null, and clearing then would lose the re-delivery for good.
     let rulesFull: string | null = null;
     if ((event === 'SessionStart' || event === 'UserPromptSubmit' || event === 'PostToolUse')
-      && agentId && this.rulesDueAfterCompact.delete(agentId)) {
+      && agentId && this.rulesDueAfterCompact.has(agentId)) {
       rulesFull = this.getRulesFullSet?.(agentId) ?? null;
+      if (rulesFull) this.rulesDueAfterCompact.delete(agentId);
     }
 
     if (steer || roster || goal || rulesFull || rulesNotice) {

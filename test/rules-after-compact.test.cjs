@@ -70,7 +70,7 @@ function harness(opts = {}) {
     session_id: 'session-1',
     ...extra
   });
-  return { fire, writeStore, rows };
+  return { fire, writeStore, storePath, rows };
 }
 
 const context = (res) => res?.hookSpecificOutput?.additionalContext ?? '';
@@ -167,6 +167,20 @@ test('no rules store: a compaction injects nothing', () => {
   fire('SessionStart');
   fire('PostCompact');
   assert.equal(context(fire('UserPromptSubmit')), '');
+});
+
+test('an unreadable store mid-edit does not lose the re-delivery', () => {
+  const { fire, storePath, writeStore } = harness();
+  fire('SessionStart');
+  fire('UserPromptSubmit');
+  fire('PostCompact');
+
+  fs.writeFileSync(storePath, '{"rev": 1, "rules": [');   // caught half-written
+  assert.doesNotMatch(context(fire('UserPromptSubmit')), FULL);
+
+  writeStore(store(1));
+  assert.match(context(fire('UserPromptSubmit')), FULL, 'delivered once the store reads again');
+  assert.doesNotMatch(context(fire('UserPromptSubmit')), FULL, 'and only once');
 });
 
 test('re-delivery is logged so an operator can see it happened', () => {
