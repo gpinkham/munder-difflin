@@ -81,7 +81,7 @@ test('compaction then prompt: the full rule set arrives once', () => {
   fire('SessionStart');
   fire('UserPromptSubmit'); // first-ever notice consumed here
 
-  fire('PreCompact');
+  assert.equal(context(fire('PreCompact')), '', 'PreCompact itself carries nothing');
   assert.equal(context(fire('PostCompact')), '', 'PostCompact itself carries nothing');
 
   const after = context(fire('UserPromptSubmit'));
@@ -102,6 +102,7 @@ test('without a compaction, prompts never carry the full set', () => {
 
 test('the set is role-scoped: each agent gets only the rules that target it', () => {
   const { fire } = harness();
+  fire('PreCompact', {}, 'pam');
   fire('PostCompact', {}, 'pam');
   const pam = context(fire('UserPromptSubmit', {}, 'pam'));
   assert.match(pam, /Write only to your own folder/);
@@ -112,6 +113,7 @@ test('the set is role-scoped: each agent gets only the rules that target it', ()
 test('an agent working through tool calls gets it on the next PostToolUse', () => {
   const { fire } = harness();
   fire('SessionStart');
+  fire('PreCompact');
   fire('PostCompact');
   assert.match(context(fire('PostToolUse', { tool_name: 'Read' })), FULL);
   assert.doesNotMatch(context(fire('UserPromptSubmit')), FULL);
@@ -126,8 +128,10 @@ test('SessionStart source=compact also re-delivers, once', () => {
 test('each compaction re-delivers again', () => {
   const { fire } = harness();
   fire('SessionStart');
+  fire('PreCompact');
   fire('PostCompact');
   assert.match(context(fire('UserPromptSubmit')), FULL);
+  fire('PreCompact');
   fire('PostCompact');
   assert.match(context(fire('UserPromptSubmit')), FULL);
 });
@@ -144,6 +148,7 @@ test('a rule change still notifies, and a later compaction delivers the new set'
   assert.doesNotMatch(notice, FULL, 'a change is a diff, not the full set');
   assert.equal(context(fire('UserPromptSubmit')), '', 'the change notice fires once');
 
+  fire('PreCompact');
   fire('PostCompact');
   const after = context(fire('UserPromptSubmit'));
   assert.match(after, /Authority rules \(rev 2\)/);
@@ -156,6 +161,7 @@ test('re-delivery does not consume a pending change notice', () => {
   fire('UserPromptSubmit');
   writeStore(store(2, [{ id: 'new-rule', text: 'Brand-new rule.', scope: { kind: 'global' }, status: 'active' }]));
 
+  fire('PreCompact');
   fire('PostCompact');
   const both = context(fire('UserPromptSubmit'));
   assert.match(both, FULL);
@@ -165,6 +171,7 @@ test('re-delivery does not consume a pending change notice', () => {
 test('no rules store: a compaction injects nothing', () => {
   const { fire } = harness({ store: null });
   fire('SessionStart');
+  fire('PreCompact');
   fire('PostCompact');
   assert.equal(context(fire('UserPromptSubmit')), '');
 });
@@ -173,6 +180,7 @@ test('an unreadable store mid-edit does not lose the re-delivery', () => {
   const { fire, storePath, writeStore } = harness();
   fire('SessionStart');
   fire('UserPromptSubmit');
+  fire('PreCompact');
   fire('PostCompact');
 
   fs.writeFileSync(storePath, '{"rev": 1, "rules": [');   // caught half-written
@@ -186,6 +194,7 @@ test('an unreadable store mid-edit does not lose the re-delivery', () => {
 test('an app restart after a compaction: the resumed session gets the rules once', () => {
   const before = harness();
   before.fire('SessionStart');
+  before.fire('PreCompact');
   before.fire('PostCompact');
   // The app restarts before the next prompt: a new HookServer, the mark gone.
   const { fire } = harness();
@@ -198,8 +207,33 @@ test('a fresh startup session does not get the post-compact set', () => {
   assert.doesNotMatch(context(fire('SessionStart', { source: 'startup' })), FULL);
 });
 
+test('SessionStart(compact) before PostCompact: rules and goal arrive once, not twice', () => {
+  const { fire } = harness({ goal: 'Ship the release safely.' });
+  fire('SessionStart');
+  fire('UserPromptSubmit');
+
+  fire('PreCompact');
+  const start = context(fire('SessionStart', { source: 'compact' }));
+  assert.match(start, FULL);
+  assert.match(start, /Ship the release safely/);
+  fire('PostCompact');
+  assert.equal(context(fire('UserPromptSubmit')), '', 'nothing repeated after PostCompact');
+});
+
+test('SessionStart(compact) after PostCompact: rules arrive once', () => {
+  const { fire } = harness();
+  fire('SessionStart');
+  fire('UserPromptSubmit');
+
+  fire('PreCompact');
+  fire('PostCompact');
+  assert.match(context(fire('SessionStart', { source: 'compact' })), FULL);
+  assert.doesNotMatch(context(fire('UserPromptSubmit')), FULL);
+});
+
 test('re-delivery is logged so an operator can see it happened', () => {
   const { fire, rows } = harness();
+  fire('PreCompact');
   fire('PostCompact');
   fire('UserPromptSubmit');
   assert.ok(rows.some((r) => r.kind === 'rules-redelivered' && r.agentId === 'jim' && r.rev === 1));

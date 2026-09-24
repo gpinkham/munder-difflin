@@ -69,7 +69,7 @@ export class HookServer {
    *  agent has one live session, and a new session id replaces the old entry. */
   private deliveredGoalByAgent = new Map<string, { sessionId: string | null; goal: string | null }>();
   /** Agents compacted since their rules were last put back in context (md-197).
-   *  Set on PostCompact, drained by the next hook that can carry context. Lost on
+   *  Set on PreCompact, drained by the next hook that can carry context. Lost on
    *  an app restart, and that is covered without saving it: a restarted agent
    *  resumes its (possibly compacted) session, and SessionStart source=resume
    *  arms the re-delivery again. Nothing reaches the agent from memory.md unless
@@ -294,16 +294,21 @@ export class HookServer {
     if (event === 'PreCompact' && agentId) this.breaker?.recordCompactStart(agentId);
     if ((event === 'PostCompact' || event === 'SessionStart') && agentId) {
       this.breaker?.recordCompactEnd(agentId);
-      // A compact keeps the session id (md-138), so the once-per-session goal
-      // would otherwise never come back. Forget it; the next prompt re-delivers.
+    }
+    // A compact keeps the session id (md-138), so the once-per-session goal
+    // would otherwise never come back. Forget it when the compaction STARTS:
+    // no context-carrying hook fires before it ends, and forgetting at the end
+    // would re-send a goal that a SessionStart(compact) had already delivered.
+    if ((event === 'PreCompact' || event === 'SessionStart') && agentId) {
       this.deliveredGoalByAgent.delete(agentId);
     }
     // md-197: the compaction summary keeps only what the agent chose to carry,
-    // so the rules go back in on the next hook that can carry context. Also
+    // so the rules go back in on the next hook that can carry context. Armed
+    // when the compaction starts, for the same reason as the goal above. Also
     // armed by SessionStart source=compact, should Claude Code ever send one,
     // and source=resume: a resume rebuilds context from a transcript that may
     // have been compacted, and it is how an agent comes back after an app restart.
-    if (agentId && (event === 'PostCompact'
+    if (agentId && (event === 'PreCompact'
       || (event === 'SessionStart' && (p.source === 'compact' || p.source === 'resume')))) {
       this.rulesDueAfterCompact.add(agentId);
     }

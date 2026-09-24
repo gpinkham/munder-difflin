@@ -94,6 +94,7 @@ test('a compaction re-delivers the goal even though the session id is unchanged 
   assert.match(context(fire('SessionStart')), /Ship the release safely/);
   assert.equal(context(fire('UserPromptSubmit')), '');
 
+  fire('PreCompact');
   fire('PostCompact');
   assert.match(context(fire('UserPromptSubmit')), /Ship the release safely/);
   assert.equal(context(fire('UserPromptSubmit')), '');
