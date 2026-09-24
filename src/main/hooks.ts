@@ -68,6 +68,11 @@ export class HookServer {
    *  prompt only bloats the transcript. One entry per agent is sufficient: an
    *  agent has one live session, and a new session id replaces the old entry. */
   private deliveredGoalByAgent = new Map<string, { sessionId: string | null; goal: string | null }>();
+  /** Agents compacted since their rules were last put back in context (md-197).
+   *  Set on PostCompact, drained by the next hook that can carry context. In
+   *  memory on purpose: an app restart starts a fresh session, and SessionStart
+   *  delivers the managed block through memory.md anyway. */
+  private rulesDueAfterCompact = new Set<string>();
 
   /** Opt-in authority policy (policy.ts). Built on first use so a harness with no
    *  policy file pays nothing, and so tests that construct a HookServer without a
@@ -94,7 +99,11 @@ export class HookServer {
      *  been told about the current rule revision, or null. Keyed on REVISION and
      *  persisted to disk, so unlike the standing goal it neither decays after a
      *  compact nor re-spams after a restart. Optional: no rules store, no notice. */
-    private takeRulesNotice?: (agentId: string) => string | null
+    private takeRulesNotice?: (agentId: string) => string | null,
+    /** md-197 — the agent's FULL current rule set, re-injected once after each
+     *  compaction so the rules do not depend on the agent choosing to re-read
+     *  memory.md. Optional: no rules store, nothing to re-deliver. */
+    private getRulesFullSet?: (agentId: string) => string | null
   ) {}
 
   start(): void {
@@ -287,6 +296,12 @@ export class HookServer {
       // would otherwise never come back. Forget it; the next prompt re-delivers.
       this.deliveredGoalByAgent.delete(agentId);
     }
+    // md-197: the compaction summary keeps only what the agent chose to carry,
+    // so the rules go back in on the next hook that can carry context. Also
+    // armed by SessionStart source=compact, should Claude Code ever send one.
+    if (agentId && (event === 'PostCompact' || (event === 'SessionStart' && p.source === 'compact'))) {
+      this.rulesDueAfterCompact.add(agentId);
+    }
 
     if ((event === 'Stop' || event === 'SubagentStop') && agentId) {
       // Respect any upstream Stop hook that already re-entered this boundary.
@@ -405,12 +420,21 @@ export class HookServer {
       ? (this.takeRulesNotice?.(agentId) ?? null)
       : null;
 
-    if (steer || roster || goal || rulesNotice) {
+    // Full rule set after a compaction (md-197) — once per compaction, on the
+    // first hook that can carry context. PostToolUse counts: an agent that
+    // auto-compacts mid-task may not see another prompt for a long time.
+    let rulesFull: string | null = null;
+    if ((event === 'SessionStart' || event === 'UserPromptSubmit' || event === 'PostToolUse')
+      && agentId && this.rulesDueAfterCompact.delete(agentId)) {
+      rulesFull = this.getRulesFullSet?.(agentId) ?? null;
+    }
+
+    if (steer || roster || goal || rulesFull || rulesNotice) {
       this.emit(agentId, event, p);
       return {
         hookSpecificOutput: {
           hookEventName: event,
-          additionalContext: [roster, goal, rulesNotice, steer].filter(Boolean).join('\n\n')
+          additionalContext: [roster, goal, rulesFull, rulesNotice, steer].filter(Boolean).join('\n\n')
         }
       };
     }

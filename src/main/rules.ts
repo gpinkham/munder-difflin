@@ -509,6 +509,28 @@ export class RulesManager {
   }
 
 
+  /**
+   * The agent's FULL current rule set, for re-delivery after a compaction (md-197).
+   *
+   * The managed block lives in memory.md, and a compaction summary keeps only
+   * what the agent chose to carry over — so the harness puts the set back itself
+   * rather than trusting the agent to re-read. Same text as the managed block,
+   * minus the sentinel comments, which mean nothing outside the file.
+   *
+   * Pure read: records no delivery, so it never swallows or triggers the
+   * rev-keyed change notice. null when there is no store to deliver.
+   */
+  fullSet(agentId: string): string | null {
+    if (!this.active) return null;
+    const store = this.read();
+    if (!store) return null;
+    const block = this.renderBlock(agentId, store.rev, this.rulesFor(agentId, store.rules));
+    const body = block.split('\n').filter((l) => !l.startsWith(BEGIN_PREFIX) && l !== END_MARKER);
+    this.log({ kind: 'rules-redelivered', agentId, rev: store.rev, reason: 'post-compact' });
+    return `<rules>\nRe-delivered after compaction: your full current rule set.\n${body.join('\n')}\n</rules>`;
+  }
+
+
   // — authoring (Phase 3) —
 
   /**
