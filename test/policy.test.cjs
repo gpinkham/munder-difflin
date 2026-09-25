@@ -736,6 +736,80 @@ test('14g. a non-Bash tool, and an unconfigured engine, write nothing', () => {
   assert.equal(inert.rows.length, 0, 'unconfigured stays byte-identical');
 });
 
+// --- 15. Self-protection: the heuristic is scoped to one segment (md-199e) --
+
+test('15. the policy files cannot be written, by any mechanism I could think of', () => {
+  const { e, root } = engine([]);
+  const D = path.join(root, 'policy');
+  for (const command of [
+    `echo '{}' > ${D}/authority.json`,
+    `echo x >> ${D}/authority.json`,
+    `rm -rf ${D}`,
+    `rm ${D}/authority.json`,
+    `sed -i '' s/deny/allow/ ${D}/authority.json`,
+    `sed --in-place s/deny/allow/ ${D}/authority.json`,
+    `sudo -u gpinkham sed -i '' s/deny/allow/ ${D}/authority.json`,
+    `nice -n 5 rm ${D}/authority.json`,
+    `cp evil.json ${D}/authority.json`,
+    `cp -t ${D} evil.json`,
+    `mv evil.json ${D}/authority.json`,
+    `tee ${D}/authority.json < evil.json`,
+    `touch ${D}/OFF`,
+    `mkdir -p ${D}/sub`,
+    `chmod 777 ${D}/authority.json`,
+    `truncate -s 0 ${D}/authority.json`,
+    `dd if=/dev/null of=${D}/authority.json`,
+    `ln -sf evil.json ${D}/authority.json`,
+    `rsync -a ./evil/ ${D}/`,
+    `install -m 644 evil.json ${D}/authority.json`,
+    `tar -xzf evil.tgz -C ${D}`,
+    `cd ${D} && cp evil.json authority.json`,
+    `bash -c "rm ${D}/authority.json"`,
+    `node -e "require('fs').writeFileSync('${D}/authority.json','{}')"`,
+    `python3 -c "open('${D}/authority.json','w').write('{}')"`,
+    `python3 -c "import os; os.system('rm ${D}/authority.json')"`,
+    // The per-segment heuristic, earning its keep: a verb the parser does not table,
+    // so there is no extracted target and the string is all we have.
+    `busybox sed -i s/deny/allow/ ${D}/authority.json`,
+    // The fallback: verb and path in DIFFERENT segments, and a segment the parser
+    // admits it could not read — so the segmentation cannot be trusted.
+    `cat plan.txt | xargs rm && wc -l ${D}/decisions.jsonl`
+  ]) {
+    const v = e.evaluate(pre('Bash', { command }, 'agent-a'));
+    assert.equal(v.decision, 'deny', command);
+    assert.equal(v.ruleId, 'policy-self-protection', command);
+  }
+});
+
+test('15b. policy-adjacent work is not denied because a verb sits elsewhere in the string', () => {
+  const { e, root } = engine([]);
+  const D = path.join(root, 'policy');
+  for (const command of [
+    // The measured false positive this narrowing is for: two unrelated segments.
+    `cp verdicts-after.json verdicts-before.json && wc -l ${D}/decisions.jsonl`,
+    `rm /tmp/scratch.json && grep -c firing ${D}/decisions.jsonl`,
+    `mkdir -p /tmp/out && jq . ${D}/decisions.jsonl > /tmp/out/x.json`,
+    `cp /tmp/a /tmp/b && cat ${D}/authority.json`,
+    // Copying the rules OUT is a read: the verb's target WAS resolved, and it is
+    // somewhere else, so there is nothing left to guess about.
+    `cp ${D}/authority.json /tmp/mine.json`,
+    `tail -5 ${D}/decisions.jsonl > /tmp/tail.txt`,
+    `zip -r /tmp/policy.zip ${D}`,
+    `tar -czf /tmp/policy.tgz -C ${root} policy`,
+    // Reading the rule you just tripped, every ordinary way.
+    `cat ${D}/authority.json`,
+    `grep -n cross-agent ${D}/authority.json`,
+    `sed -n '1,5p' ${D}/authority.json`,
+    `jq '.rules[].id' ${D}/authority.json`,
+    `diff ${D}/authority.json /tmp/copy.json`,
+    `node -e "console.log(require('fs').readFileSync('${D}/authority.json','utf8'))"`,
+    `python3 -c "print(open('${D}/authority.json').read())"`,
+    `echo "do not edit ${D}/authority.json"`
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command }, 'agent-a')).decision, 'allow', command);
+  }
+});
+
 // --- the glob engine -------------------------------------------------------
 
 test('globToRegExp: * stops at a separator, ** crosses it', () => {

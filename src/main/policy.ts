@@ -68,11 +68,17 @@ const MATCHERS = [
  * (`cat`, `grep`, `sed -n`) are absent on purpose — an agent should be able to
  * read the rule it just tripped.
  *
- * Kept as a FALLBACK beside the parsed write targets rather than replaced by them.
- * It fires on shapes the parser resolves to nothing (a path built at run time, a
- * verb not in its table). Two over-inclusive tests OR'd together can only deny
- * more than either alone, which for the one invariant that makes every other rule
- * meaningful is the right direction.
+ * SCOPED TO ONE PARSED COMMAND, not to the whole Bash string. Applied to the whole
+ * string it denied `cp a b && wc -l <policy>/decisions.jsonl` — two unrelated
+ * segments, one of which merely READS the ledger — because the verb and the path
+ * were both somewhere in the text. That was a measured false positive on real work,
+ * and it recurs for anyone working on the policy files, which is exactly the person
+ * who needs to read them. The verb and the path must appear in the same segment.
+ *
+ * The whole-string form survives as a fallback for a command the parser admits it
+ * could not read (`unresolved` in shell.ts): if the segmentation is not trustworthy
+ * we should not lean on it, and for the one invariant that makes every other rule
+ * meaningful the unreadable case errs toward deny.
  */
 const POLICY_WRITE_SHAPE =
   /(>>?\s*\S*policy)|(\btee\b)|(\bsed\b[^|;&]*\s-[a-zA-Z]*i)|(\b(rm|mv|cp|mkdir|touch|chmod|chown|truncate|shred|unlink|ln|install|rsync|dd)\b)/;
@@ -326,11 +332,26 @@ export class PolicyEngine {
       const input = (p.tool_input ?? {}) as Record<string, unknown>;
       const cmd = typeof input.command === 'string' ? input.command : '';
       if (!cmd) return false;
-      // Parsed first: this catches `node -e "writeFileSync('<policy>')"` and a
-      // write through a symlink, neither of which the string test sees.
-      for (const c of this.commands(p, ctx)) if (c.writes.some(under)) return true;
-      if (!cmd.includes(this.policyDir)) return false;
-      return POLICY_WRITE_SHAPE.test(cmd);
+      const commands = this.commands(p, ctx);
+      // 1. A real write target under the policy directory. The accurate test, and
+      //    since the wrapper fix it also catches `sudo -u x sed -i '' s/a/b/ <policy>`.
+      for (const c of commands) if (c.writes.some(under)) return true;
+      // 2. The string heuristic, per segment, and only for a segment whose target the
+      //    parser could not extract at all — `busybox sed -i s/a/b/ <policy>/x` is a
+      //    verb it does not table. When a target WAS read and it is somewhere else,
+      //    trust that: `cp <policy>/authority.json /tmp/mine.json` copies the rules OUT,
+      //    which is a read, and guessing over a target we actually resolved is how a
+      //    heuristic starts denying the work it is meant to protect.
+      for (const c of commands) {
+        if (c.writes.length) continue;
+        if (c.text.includes(this.policyDir) && POLICY_WRITE_SHAPE.test(c.text)) return true;
+      }
+      // 3. Only when the parser says it could not read this command do we fall back to
+      //    the whole string, because then the segmentation above cannot be trusted.
+      if (commands.some((c) => c.unresolved.length)) {
+        return cmd.includes(this.policyDir) && POLICY_WRITE_SHAPE.test(cmd);
+      }
+      return false;
     }
     return false;
   }
