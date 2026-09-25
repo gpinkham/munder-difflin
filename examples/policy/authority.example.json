@@ -20,6 +20,16 @@
     "Matchers: tool | path_glob | path_not_glob | command_matches |",
     "command_not_matches. Within a rule every key must match. Rules are tried in",
     "file order and the first match wins. For OR, write two rules.",
+    "",
+    "A Bash command is PARSED before it is matched, so what these matchers see is",
+    "each command the call actually runs - after sudo/nohup/eval/bash -c/$(..)",
+    "unwrapping, simple variable expansion, and basename-ing of an absolute",
+    "program path - and each path it actually writes, absolute and with symlinks",
+    "resolved. That is why the command patterns below anchor at ^ with no",
+    "separator alternation: the parser supplies the boundary, and a MENTION of a",
+    "guarded command inside a quoted string, an echo or a heredoc body stays one",
+    "word and cannot look like an invocation. The raw string is still matched too,",
+    "so a pattern written before this change keeps behaving as it did.",
     "${AGENT_ID} is the only interpolation; a rule using it does not match a",
     "payload with no agent id."
   ],
@@ -36,8 +46,9 @@
       "mode": "dry_run",
       "on_error": "allow",
       "_on_error_why": "A bug in path matching must not be able to stop every agent from writing its own files. A missed write is one recoverable file; a false deny is the whole floor.",
+      "_match_why": "Bash is in the tool list because most cross-agent writes are not Write calls: a redirection, cp/mv/rsync/ln/install into another folder, sed -i, tee, touch, rm, or a path inside node -e / python3 -c. The engine hands path_glob the paths the PARSED command writes, so a read of another agent (cat, ls, grep, diff, wc, head) still has no target and still cannot fire - reading another agent's files is explicitly allowed. path_not_glob is judged per path, so a command writing both your folder and someone else's is not exempted by its allowed half.",
       "match": {
-        "tool": ["Write", "Edit", "NotebookEdit"],
+        "tool": ["Write", "Edit", "NotebookEdit", "Bash"],
         "path_glob": "**/hive/agents/*/**",
         "path_not_glob": "**/hive/agents/${AGENT_ID}/**"
       },
@@ -50,9 +61,10 @@
       "mode": "dry_run",
       "on_error": "deny",
       "_on_error_why": "The one rule that fails closed. It guards an irreversible wipe, so refusing an unevaluable command costs one retry while allowing it can cost every agent's memory.",
+      "_match_why": "Anchored at ^ against each PARSED command, which is what makes a separator alternation unnecessary: a newline, a `;`, a `&&`, a subshell, `sudo`, `nohup`, `eval`, `$M`, `python3 -m mempalace` and `/usr/local/bin/mempalace` all arrive here as the bare invocation, while a mention inside a quoted string or a heredoc body arrives as one word of some other command. The trailing flags-only tail is the one heuristic: flags may follow the subcommand, bare words may not. `mempalace sync` takes no positional argument, so `mempalace sync is forbidden` is prose - the shape a sentence about the command takes when it happens to start a line of a multi-line call. KNOWN, MEASURED GAP: that also means a literal `mempalace sync <word>` is missed; and an invocation whose subcommand arrives on a pipe we cannot read (`cat plan | xargs mempalace`) parses to an unresolved operand and is not caught. Both are misses, not false alarms, on a rule that otherwise fires on nothing it should not.",
       "match": {
         "tool": "Bash",
-        "command_matches": "^\\s*mempalace\\s+(sync|repair)\\b"
+        "command_matches": "^mempalace +(sync|repair)( +-\\S+.*)?$"
       },
       "reason": "mempalace sync deletes every per-agent wing and cannot be undone. To record something, append to your own memory.md - it is mined automatically. If a palace really needs repairing, ask the operator."
     },
@@ -63,12 +75,12 @@
       "mode": "dry_run",
       "on_error": "allow",
       "_on_error_why": "Fails open because an unasked push is recoverable, while an office that cannot push is blocked on a human for every change.",
-      "_match_why": "Anchored to a command position, never a bare substring. The -C/-c branch matters: `git -C <dir> push` is how a push gets issued from outside a repo, and a pattern without it misses exactly that case. Anchoring also means a MENTION of git push - in a heredoc, an echo, or a grep - correctly does not fire.",
+      "_match_why": "Anchored at ^ against each PARSED command, so the separator alternation and the multi-line gap are both gone: `cd x && git push`, `bash -c (git push)`, `G=git; $G push` and a push on line 5 of a multi-line call all arrive as `git push`, while `echo git push`, a grep for the quoted phrase and `git commit -m (prepare push)` do not. The -C/-c branch stays because `git -C <dir> push` is how a push is issued from outside a repo. Requiring push in SUBCOMMAND position is what keeps `git log --grep push` and `git stash push -m wip` out. The other alternatives are the rule VOCABULARY, not its anchoring: publishing does not only happen through `git push`. `git subtree push`, `hub push`, `gh pr create`, `gh release create`, `gh repo sync`, `npm publish` and a `curl -X PATCH` at the GitHub refs API all put work outside this machine, and an ask-class rule that names only one of them teaches an agent which spelling is unwatched. `git p` is included as the common alias; `git pull` is not, because the word boundary after `p` stops there. `--dry-run` is exempted up front: a dry run publishes nothing, and the lookahead is per PARSED command, so `npm publish --dry-run && git push` still stops on the second one. KNOWN GAP: a shell alias or function defined elsewhere (alias gp=git push) is invisible to a parser that only sees this one command.",
       "match": {
         "tool": "Bash",
-        "command_matches": "(^|[;&|]\\s*)git\\s+(?:-[Cc]\\s+\\S+\\s+|-{1,2}\\S+\\s+)*push\\b"
+        "command_matches": "^(?!.*--dry-run)(?:git(?:\\s+-[Cc]\\s+\\S+|\\s+-{1,2}\\S+)*\\s+(?:push|p)\\b|git\\s+subtree\\s+push\\b|hub\\s+push\\b|gh\\s+(?:pr\\s+create|release\\s+create|repo\\s+sync)\\b|(?:npm|yarn|pnpm)\\s+publish\\b|curl\\b(?=.*-X\\s+(?:POST|PATCH|PUT|DELETE))(?=.*api\\.github\\.com))"
       },
-      "reason": "Pushing publishes work outside this machine, so it is the operator's decision. Commit to a branch, report the branch name, and ask before pushing."
+      "reason": "Publishing work outside this machine - a push, a PR, a release, an npm publish, a write to the GitHub API - is the operator's decision. Commit to a branch, report the branch name, and ask first."
     }
   ]
 }

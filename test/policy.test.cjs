@@ -380,6 +380,203 @@ test('defaults.mode applies to rules that omit mode', () => {
   assert.equal(e.evaluate(pre('Bash', { command: 'mempalace sync' })).decision, 'deny');
 });
 
+// --- 12. Bash is parsed, so a rule matches what the command does ------------
+//
+// md-188 measured these three rules allowing 81.5% of disguised violations. Each
+// test below is one of the shapes that measurement found, asserted through the
+// rules rather than through the parser (test/shell.test.cjs covers the parser).
+
+/** The shipped example pack, forced live — the rules an operator actually gets. */
+function shipped() {
+  const pack = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'examples/policy/authority.example.json'), 'utf8'));
+  for (const r of pack.rules) r.mode = 'live';
+  const { e } = engine(pack.rules);
+  return e;
+}
+
+test('12. the shipped pack loads with every rule valid', () => {
+  const e = shipped();
+  assert.equal(e.error, null);
+  assert.equal(e.ruleCount, 3);
+});
+
+test('12a. a disguised mempalace sync is denied however it is spelled', () => {
+  const e = shipped();
+  for (const command of [
+    'mempalace sync',
+    'sudo mempalace sync',
+    'nohup mempalace sync &',
+    '/usr/local/bin/mempalace repair',
+    'python3 -m mempalace sync',
+    'eval "mempalace repair"',
+    'bash -c \'mempalace sync\'',
+    '(mempalace repair)',
+    'M=mempalace; $M sync',
+    'for c in sync; do mempalace $c; done',
+    'xargs -I{} mempalace {} <<< sync',
+    'cd /tmp && mempalace sync',
+    'ls\nmempalace repair',
+    'mempalace repair --force'
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command })).decision, 'deny', command);
+  }
+});
+
+test('12b. a mention of mempalace sync, and every read of the palace, still passes', () => {
+  const e = shipped();
+  for (const command of [
+    'mempalace wake-up',
+    'mempalace search sync',
+    'mempalace search "how to sync"',
+    'mempalace status',
+    'mempalace --help',
+    'echo "never run mempalace sync"',
+    'echo hi\n    mempalace sync is forbidden',
+    'grep -n "mempalace sync" PROTOCOL.md',
+    'python3 -m mempalace search \'repair notes\'',
+    'cat <<\'EOF\'\nmempalace sync\nEOF'
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command })).decision, 'allow', command);
+  }
+});
+
+test('12c. publishing is asked about under every spelling that leaves this machine', () => {
+  const e = shipped();
+  for (const command of [
+    'git push',
+    'git push -u origin fix/login',
+    'git -C /r push',
+    'git -c user.name=x push',
+    'cd /r && git push --force',
+    'git add -A && git commit -m wip && git push',
+    'bash -c \'git push origin HEAD\'',
+    'G=git; $G push',
+    'git p',
+    'git subtree push --prefix docs origin gh-pages',
+    'hub push origin HEAD',
+    'gh pr create --fill --head feat/x',
+    'gh release create v1.0.0 --generate-notes',
+    'gh repo sync --force',
+    'npm publish',
+    'curl -X PATCH -H \'Authorization: token $T\' https://api.github.com/repos/o/r/git/refs/heads/main -d \'{"sha":"a"}\''
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command })).decision, 'ask', command);
+  }
+});
+
+test('12d. the git commands that do not publish, and a dry run, are not asked about', () => {
+  const e = shipped();
+  for (const command of [
+    'git status', 'git fetch origin', 'git pull --rebase', 'git log --grep push',
+    'git commit -m \'prepare push\'', 'git stash push -m wip', 'git config push.default simple',
+    'git -C /r log --oneline -3', 'echo git push', 'grep -rn "git push" README.md',
+    'gh pr view 12', 'gh pr list',
+    'git push --dry-run', 'npm publish --dry-run'
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command })).decision, 'allow', command);
+  }
+});
+
+test('12e. --dry-run in one command does not exempt a real push in the next', () => {
+  const e = shipped();
+  assert.equal(e.evaluate(pre('Bash', { command: 'npm publish --dry-run && git push' })).decision, 'ask');
+});
+
+test('12f. a bash write into another agent folder is denied, whatever writes it', () => {
+  const e = shipped();
+  const other = '/x/hive/agents/agent-b';
+  for (const command of [
+    `cat draft.md > ${other}/inbox/m.json`,
+    `echo done >> ${other}/memory.md`,
+    `printf x > ${other}/scratch.txt`,
+    `cp /tmp/d.md ${other}/inbox/m.json`,
+    `mv ./out.json ${other}/results/report.md`,
+    `rsync -a ./update/ ${other}/`,
+    `tee ${other}/results/report.md < notes.txt`,
+    `sed -i '' s/old/new/ ${other}/memory.md`,
+    `touch ${other}/inbox/m.json`,
+    `rm ${other}/outbox/msg.json`,
+    `node -e "require('fs').writeFileSync('${other}/notes/todo.md','x')"`,
+    `python3 -c "open('${other}/memory.md','w').write('x')"`
+  ]) {
+    const v = e.evaluate(pre('Bash', { command }, 'agent-a'));
+    assert.equal(v.decision, 'deny', command);
+    assert.equal(v.ruleId, 'cross-agent-write');
+  }
+});
+
+test('12g. a bash write into your OWN folder, and every read of another, still passes', () => {
+  const e = shipped();
+  const mine = '/x/hive/agents/agent-a';
+  const other = '/x/hive/agents/agent-b';
+  for (const command of [
+    `echo done >> ${mine}/scratch.txt`,
+    `cp /tmp/d.md ${mine}/outbox/msg.json`,
+    `sed -i '' s/old/new/ ${mine}/memory.md`,
+    `mv ./out.json ${mine}/memory.md`,
+    `tee ${mine}/results/report.md < notes.txt`,
+    `python3 -c "open('${mine}/memory.md','w').write('x')"`,
+    `cat ${other}/memory.md`,
+    `ls ${other}`,
+    `head -20 ${other}/inbox/m.json`,
+    `wc -l ${other}/outbox/msg.json`,
+    `grep -n TODO ${other}/notes/todo.md`,
+    `diff ${other}/notes/todo.md /tmp/copy.md`,
+    `sed -n '1,5p' ${other}/memory.md`,
+    `node -e "console.log(require('fs').readFileSync('${other}/memory.md','utf8'))"`,
+    `cp ${other}/memory.md ${mine}/copy.md`
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command }, 'agent-a')).decision, 'allow', command);
+  }
+});
+
+test('12h. path_not_glob is judged per path: writing both folders at once is not exempt', () => {
+  const e = shipped();
+  const v = e.evaluate(pre('Bash', {
+    command: 'tee /x/hive/agents/agent-a/mine.md /x/hive/agents/agent-b/theirs.md'
+  }, 'agent-a'));
+  assert.equal(v.decision, 'deny', 'the allowed half must not cover the other one');
+});
+
+test('12i. a Bash payload with no write target cannot fire a path rule', () => {
+  const { e } = engine([{ ...OWN_FOLDER_RULE, match: { ...OWN_FOLDER_RULE.match, tool: ['Write', 'Bash'] } }]);
+  assert.equal(e.evaluate(pre('Bash', { command: 'ls /x/hive/agents/agent-b' }, 'agent-a')).decision, 'allow');
+  assert.equal(e.evaluate(pre('Bash', { command: 'echo hello' }, 'agent-a')).decision, 'allow');
+});
+
+test('12j. a write through a symlink into another agent folder is still a write to it', () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'md-policy-link-')));
+  fs.mkdirSync(path.join(tmp, 'hive/agents/agent-b'), { recursive: true });
+  fs.symlinkSync(path.join(tmp, 'hive/agents/agent-b'), path.join(tmp, 'shortcut'));
+  const e = shipped();
+  const v = e.evaluate(pre('Write', { file_path: path.join(tmp, 'shortcut/memory.md'), content: 'x' }, 'agent-a'));
+  assert.equal(v.decision, 'deny', 'a glob compares strings, so the link has to be resolved first');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('12k. self-protection catches a write to the policy file through an inline script', () => {
+  const { e, root } = engine([]);
+  const target = path.join(root, 'policy', 'authority.json');
+  const v = e.evaluate(pre('Bash', { command: `node -e "require('fs').writeFileSync('${target}','{}')"` }));
+  assert.equal(v.decision, 'deny');
+  assert.equal(v.ruleId, 'policy-self-protection');
+});
+
+test('12l. self-protection still lets an agent READ the rule it just tripped', () => {
+  const { e, root } = engine([]);
+  const target = path.join(root, 'policy', 'authority.json');
+  for (const command of [`cat ${target}`, `grep -n cross-agent ${target}`, `sed -n '1,5p' ${target}`]) {
+    assert.equal(e.evaluate(pre('Bash', { command })).decision, 'allow', command);
+  }
+});
+
+test('12m. an old-style pattern written against the raw string keeps working', () => {
+  const { e } = engine([MEMPALACE_RULE, PUSH_RULE]);
+  assert.equal(e.evaluate(pre('Bash', { command: 'mempalace sync' })).decision, 'deny');
+  assert.equal(e.evaluate(pre('Bash', { command: 'git push origin main' })).decision, 'ask');
+  assert.equal(e.evaluate(pre('Bash', { command: 'echo git push' })).decision, 'allow');
+});
+
 // --- the glob engine -------------------------------------------------------
 
 test('globToRegExp: * stops at a separator, ** crosses it', () => {

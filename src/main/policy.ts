@@ -25,11 +25,22 @@
  *     evaluates nothing and denies nothing, so an existing install sees
  *     byte-identical behaviour.
  *
+ * BASH IS PARSED, NOT PATTERN-MATCHED. A Bash payload is handed to shell.ts,
+ * which returns the commands it actually runs and the paths it actually writes;
+ * `command_matches` is tested against each of those as well as against the raw
+ * string, and `path_glob` sees bash write targets the way it sees a Write's
+ * file_path. Without that, `sudo mempalace sync` and `cat x > <other agent>/f`
+ * were simply different strings from the ones the rules described — measured at
+ * 81.5% of disguised violations wrongly allowed (md-188), 0.6% after (md-199).
+ * The parser is a normaliser, not a sandbox: see its own header for what it does
+ * not claim to catch.
+ *
  * Runs in the Electron main process, called from HookServer.handle().
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join, resolve, sep } from 'node:path';
+import { join } from 'node:path';
+import { effectiveCommands, realAbsolute, type EffectiveCommand } from './shell';
 
 /** Where a rule's path matcher reads its subject from, per tool. */
 const PATH_FIELDS = ['file_path', 'notebook_path', 'path'] as const;
@@ -52,6 +63,12 @@ const MATCHERS = [
  * `tee`, an in-place `sed`, or one of the verbs that only ever mutates. Reads
  * (`cat`, `grep`, `sed -n`) are absent on purpose — an agent should be able to
  * read the rule it just tripped.
+ *
+ * Kept as a FALLBACK beside the parsed write targets rather than replaced by them.
+ * It fires on shapes the parser resolves to nothing (a path built at run time, a
+ * verb not in its table). Two over-inclusive tests OR'd together can only deny
+ * more than either alone, which for the one invariant that makes every other rule
+ * meaningful is the right direction.
  */
 const POLICY_WRITE_SHAPE =
   /(>>?\s*\S*policy)|(\btee\b)|(\bsed\b[^|;&]*\s-[a-zA-Z]*i)|(\b(rm|mv|cp|mkdir|touch|chmod|chown|truncate|shred|unlink|ln|install|rsync|dd)\b)/;
@@ -82,6 +99,11 @@ export interface PolicyFile {
   version?: number;
   defaults?: { mode?: PolicyMode; on_error?: 'allow' | 'deny' };
   rules?: PolicyRule[];
+}
+
+/** Per-evaluation scratch, so one payload is parsed once however many rules read it. */
+interface EvalContext {
+  commands: EffectiveCommand[] | null;
 }
 
 export interface PolicyPayload {
@@ -135,10 +157,17 @@ export function globToRegExp(glob: string): RegExp {
   return new RegExp('^' + out + '$');
 }
 
-/** Normalise a payload path to an absolute, forward-slash form for matching. */
+/**
+ * Normalise a payload path to an absolute, forward-slash, symlink-resolved form.
+ *
+ * Symlinks are resolved because a glob compares strings: without it,
+ * `/tmp/shortcut/memory.md` and the agent folder it points into are different
+ * subjects, and the shorter one is not covered by any rule. Resolution walks back
+ * to the longest existing prefix, so a file that does not exist yet — the normal
+ * case for a write — still normalises through a symlinked parent.
+ */
 export function normalisePath(p: string, cwd?: string): string {
-  const abs = resolve(cwd ?? process.cwd(), p);
-  return sep === '\\' ? abs.replace(/\\/g, '/') : abs;
+  return realAbsolute(p, cwd ?? process.cwd());
 }
 
 /**
@@ -275,35 +304,59 @@ export class PolicyEngine {
    * tail: a script given the path indirectly is not caught, and no regex would.
    * The tools that do the overwhelming majority of writes are matched exactly.
    */
-  private targetsPolicy(p: PolicyPayload): boolean {
+  private targetsPolicy(p: PolicyPayload, ctx: EvalContext): boolean {
     if (!this.policyDir) return false;
     const dir = normalisePath(this.policyDir);
+    const under = (path: string) => {
+      const abs = normalisePath(path);
+      return abs === dir || abs.startsWith(dir + '/');
+    };
     const tool = p.tool_name;
     if (tool === 'Write' || tool === 'Edit' || tool === 'NotebookEdit') {
-      for (const path of this.paths(p)) {
-        const abs = normalisePath(path);
-        if (abs === dir || abs.startsWith(dir + '/')) return true;
-      }
-      return false;
+      return this.paths(p, ctx).some(under);
     }
     if (tool === 'Bash') {
       const input = (p.tool_input ?? {}) as Record<string, unknown>;
       const cmd = typeof input.command === 'string' ? input.command : '';
-      if (!cmd || !cmd.includes(this.policyDir)) return false;
+      if (!cmd) return false;
+      // Parsed first: this catches `node -e "writeFileSync('<policy>')"` and a
+      // write through a symlink, neither of which the string test sees.
+      for (const c of this.commands(p, ctx)) if (c.writes.some(under)) return true;
+      if (!cmd.includes(this.policyDir)) return false;
       return POLICY_WRITE_SHAPE.test(cmd);
     }
     return false;
   }
 
-  /** Every path this payload would write, across tools and bash redirection. */
-  private paths(p: PolicyPayload): string[] {
+  /**
+   * Every path this payload would write, across tools and bash redirection.
+   *
+   * For a tool with a path FIELD the answer is that field — exact, and unchanged.
+   * For Bash it is what shell.ts says the command writes, which is the half that
+   * used to be missing entirely: a rule saying "not outside your own folder"
+   * described `Write` and said nothing about `cat x > …`, `cp … other/`,
+   * `sed -i … other/f` or `node -e "writeFileSync(…)"`, which is how a bash-first
+   * agent writes files.
+   */
+  private paths(p: PolicyPayload, ctx: EvalContext): string[] {
     const input = (p.tool_input ?? {}) as Record<string, unknown>;
     const out: string[] = [];
     for (const f of PATH_FIELDS) {
       const v = input[f];
       if (typeof v === 'string' && v) out.push(v);
     }
+    if (p.tool_name === 'Bash') for (const c of this.commands(p, ctx)) out.push(...c.writes);
     return out;
+  }
+
+  /** shell.ts output for this payload, parsed once per evaluation and reused by
+   *  every rule — parsing is the only non-trivial cost in front of a tool call. */
+  private commands(p: PolicyPayload, ctx: EvalContext): EffectiveCommand[] {
+    if (ctx.commands) return ctx.commands;
+    const input = (p.tool_input ?? {}) as Record<string, unknown>;
+    const cmd = typeof input.command === 'string' ? input.command : '';
+    ctx.commands = cmd ? effectiveCommands(cmd) : [];
+    return ctx.commands;
   }
 
   /**
@@ -317,11 +370,12 @@ export class PolicyEngine {
 
     this.stats.evaluated++;
     this.maybeFlushStats();
+    const ctx: EvalContext = { commands: null };
 
     // Invariant, ahead of user rules and not overridable by config: an agent that
     // can edit the policy file makes every rule advisory. This holds even with no
     // policy loaded, which is why it is part of the mechanism and not a rule.
-    if (this.configured && this.targetsPolicy(p)) {
+    if (this.configured && this.targetsPolicy(p, ctx)) {
       const verdict: PolicyVerdict = {
         decision: 'deny',
         ruleId: 'policy-self-protection',
@@ -338,7 +392,7 @@ export class PolicyEngine {
     for (const rule of this.rules) {
       let hit: string | null;
       try {
-        hit = this.matches(rule, p);
+        hit = this.matches(rule, p, ctx);
       } catch (e) {
         // Per-rule failure posture. An evaluator exception is something the daemon
         // can see, unlike a daemon that never received the call — see the transport
@@ -382,7 +436,7 @@ export class PolicyEngine {
   }
 
   /** Which matcher key fired, or null if the rule does not match. */
-  private matches(rule: PolicyRule, p: PolicyPayload): string | null {
+  private matches(rule: PolicyRule, p: PolicyPayload, ctx: EvalContext): string | null {
     const m = rule.match;
     let matchedOn: string | null = null;
 
@@ -395,31 +449,47 @@ export class PolicyEngine {
     if (m.command_matches !== undefined || m.command_not_matches !== undefined) {
       const input = (p.tool_input ?? {}) as Record<string, unknown>;
       const cmd = typeof input.command === 'string' ? input.command : '';
+      // The raw string AND every command the parser says this call runs. Raw is
+      // kept so a pack written against the old behaviour keeps working; the
+      // parsed forms are what let a rule be anchored at ^ and still catch
+      // `sudo`, `eval`, `$VAR`, an absolute path or a `bash -c` wrapper.
+      const subjects = cmd ? [cmd, ...this.commands(p, ctx).map((c) => c.text)] : [];
       if (m.command_matches !== undefined) {
-        if (!cmd || !new RegExp(m.command_matches).test(cmd)) return null;
+        const re = new RegExp(m.command_matches);
+        if (!subjects.some((s) => re.test(s))) return null;
         matchedOn = 'command_matches';
       }
-      if (m.command_not_matches !== undefined && cmd && new RegExp(m.command_not_matches).test(cmd)) return null;
+      if (m.command_not_matches !== undefined) {
+        const re = new RegExp(m.command_not_matches);
+        if (subjects.some((s) => re.test(s))) return null;
+      }
     }
 
     if (m.path_glob !== undefined || m.path_not_glob !== undefined) {
-      const paths = this.paths(p).map((x) => normalisePath(x));
+      const paths = this.paths(p, ctx).map((x) => normalisePath(x));
       if (!paths.length) return null;
 
-      if (m.path_glob !== undefined) {
-        const pattern = interpolate(m.path_glob, p.agent_id);
-        if (pattern === null) return null; // unresolved ${AGENT_ID} must not match
-        const re = globToRegExp(pattern);
-        if (!paths.some((x) => re.test(x))) return null;
-        matchedOn = 'path_glob';
-      }
+      // Judged PER PATH, not per payload. With one path field the two are the
+      // same thing, which is why this never mattered before; a Bash command can
+      // write several places at once, and `tee mine/a theirs/b` must not exempt
+      // itself with the half that is allowed.
+      let negative: RegExp | null = null;
       if (m.path_not_glob !== undefined) {
         const pattern = interpolate(m.path_not_glob, p.agent_id);
         // A negative glob that cannot be resolved cannot exempt anything, so the
         // rule must not fire at all rather than fire on every agent's own files.
         if (pattern === null) return null;
+        negative = globToRegExp(pattern);
+      }
+      const eligible = negative ? paths.filter((x) => !negative!.test(x)) : paths;
+      if (!eligible.length) return null;
+
+      if (m.path_glob !== undefined) {
+        const pattern = interpolate(m.path_glob, p.agent_id);
+        if (pattern === null) return null; // unresolved ${AGENT_ID} must not match
         const re = globToRegExp(pattern);
-        if (paths.some((x) => re.test(x))) return null;
+        if (!eligible.some((x) => re.test(x))) return null;
+        matchedOn = 'path_glob';
       }
     }
 
