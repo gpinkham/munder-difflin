@@ -780,6 +780,72 @@ function flagValue(argv: string[], names: string[]): string | null {
   return null;
 }
 
+/**
+ * The inline program a command carries, if it carries one — `node -e <src>`,
+ * `python3 -c <src>`, `sh -c <src>`.
+ *
+ * Exported so a CALLER can ask about the script itself rather than about the paths the
+ * parser managed to pull out of it. That distinction matters for the policy directory:
+ * a script that names the directory and contains a write call is a write to it even
+ * when the path is assembled at run time and cannot be resolved here.
+ */
+export function inlineScript(argv: string[]): string | null {
+  const base = BASENAME_ALIAS[basename(argv[0] ?? '')] ?? basename(argv[0] ?? '');
+  const flags = INLINE_SCRIPT[base] ?? (SHELL_DASH_C.has(base) ? ['-c'] : null);
+  if (!flags) return null;
+  const i = argv.findIndex((a, k) => k > 0 && flags.includes(a));
+  return i === -1 ? null : (argv[i + 1] ?? null);
+}
+
+/** Every quoted string literal in an inline script that could be part of a path. */
+export function scriptLiterals(script: string): string[] {
+  const out: string[] = [];
+  for (const m of script.matchAll(/['"]([^'"\n]*)['"]/g)) if (m[1]) out.push(m[1]);
+  return out;
+}
+
+/**
+ * True when an inline script calls anything that WRITES, whatever it writes to.
+ *
+ * Deliberately looser than `inlineTargets`, which needs to know WHICH argument is the
+ * target and therefore only sees literal ones. This only needs to know that a write
+ * happens: `open(p,'w')` builds its path in a variable, so no target can be extracted,
+ * and it is still unmistakably a write. `process.stdout.write(...)` is not — the names
+ * below are the ones that touch a file, and printing is absent from them.
+ */
+const SCRIPT_WRITE_CALL = new RegExp(
+  '(?:'
+  + '\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream'
+  + '|truncateSync|truncate|unlinkSync|unlink|rmSync|rmdirSync|mkdirSync|makedirs'
+  + '|copyFileSync|copyFile|copyfile|renameSync|rename|cpSync|linkSync|symlinkSync)\\s*\\('
+  + '|(?:os|shutil)\\.(?:remove|unlink|mkdir|makedirs|rmdir|truncate|rename|replace|copy|copy2|copyfile|move)\\s*\\('
+  // `open(path, 'w')` — the mode is what makes it a write, wherever the path came from.
+  + '|\\bopen\\s*\\([^)]*[\'"][wax]'
+  + ')'
+);
+
+/** True when an inline script calls anything that WRITES, whatever it writes to. */
+export function scriptWrites(script: string): boolean {
+  return SCRIPT_WRITE_CALL.test(script);
+}
+
+/** The operands of a command — its non-flag words, which is where paths appear. */
+export function operandsOf(argv: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('-') && a !== '-') continue;
+    out.push(a);
+  }
+  return out;
+}
+
+/** The verb a command runs, with homebrew's `g`-prefixed coreutils folded in. */
+export function verbOf(argv: string[]): string {
+  const raw = basename(argv[0] ?? '');
+  return BASENAME_ALIAS[raw] ?? raw;
+}
+
 /** The path each write call in an inline script targets — not every path in it. */
 function inlineTargets(script: string): string[] {
   const out: string[] = [];

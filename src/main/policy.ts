@@ -44,7 +44,10 @@
 import { readFileSync, existsSync, appendFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { effectiveCommands, realAbsolute, type EffectiveCommand, type Unresolved } from './shell';
+import {
+  effectiveCommands, realAbsolute, inlineScript, scriptLiterals, scriptWrites, operandsOf, verbOf,
+  type EffectiveCommand, type Unresolved,
+} from './shell';
 
 /** Where a rule's path matcher reads its subject from, per tool. */
 const PATH_FIELDS = ['file_path', 'notebook_path', 'path'] as const;
@@ -88,6 +91,58 @@ const STATS_INTERVAL_MS = 60 * 60 * 1000;
 
 /** At most this many blind spots per row. A pathological command cannot flood a file. */
 const MAX_UNRESOLVED_PER_ROW = 20;
+
+/**
+ * THE ONE PLACE TO EDIT. Verbs allowed to name a path inside the policy directory.
+ *
+ * For the policy directory only, the default is inverted: a Bash command that names a
+ * path under it is DENIED unless its verb is listed here. Everywhere else on the disk
+ * the engine works the other way round — a write is denied, everything else passes.
+ *
+ * WHY THE INVERSION IS WORTH IT HERE AND NOWHERE ELSE. A deny-known-writers list is a
+ * list of verbs, and there is always another verb: `perl -i`, `ed -s`, `ex -sc '%d|x'`,
+ * `vim -es`, `python3 -m json.tool src dest`, tomorrow's editor. Six of them were
+ * measured writing the policy file unseen (md-199f), and each one closed by hand only
+ * invited the seventh. An allow-known-readers list cannot be outrun that way: a verb
+ * nobody has listed fails closed. The price is the opposite error — an unusual READ
+ * verb gets denied until someone adds it — and that is a one-line, reversible fix by
+ * the operator, where the other error is a guardrail that quietly does not apply.
+ *
+ * WHAT BELONGS HERE: a verb that cannot modify a file handed to it as an operand. A
+ * verb whose writes the parser already tables (`cp`, `sed`, `tar`, `zip`, `unzip`) is
+ * safe to list, because a write among its operands is caught before this list is
+ * consulted — that is what keeps `cp <policy>/authority.json /tmp/mine.json` (copying
+ * the rules OUT, a read) working. `mv`, `ln`, `tee`, `dd`, `rm`, `touch`, `install` and
+ * friends are deliberately ABSENT even though they are also tabled: naming the policy
+ * directory with one of those is not something ordinary work does.
+ *
+ * NOT HERE, on purpose: `node`, `python3`, `perl`, `ruby` and `sh -c`. An interpreter
+ * can do anything, so it is judged by what its SCRIPT contains rather than by its name
+ * (see `interpreterTouchesPolicy`) — reading the rules from a script stays allowed,
+ * writing them from one does not, even when the path is assembled at run time.
+ */
+export const POLICY_READ_VERBS = new Set([
+  // read a file
+  'cat', 'bat', 'head', 'tail', 'less', 'more', 'nl', 'od', 'xxd', 'strings', 'fold',
+  // search it
+  'grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack', 'awk', 'gawk', 'sed',
+  // parse it
+  'jq', 'yq', 'gojq', 'plutil', 'xmllint',
+  // compare it
+  'diff', 'colordiff', 'cmp', 'comm',
+  // count, slice, reshape
+  'wc', 'sort', 'uniq', 'cut', 'paste', 'join', 'tr', 'column',
+  // ask about it
+  'ls', 'find', 'fd', 'stat', 'file', 'du', 'df', 'realpath', 'readlink', 'basename', 'dirname',
+  // checksum it
+  'md5', 'md5sum', 'shasum', 'sha1sum', 'sha256sum', 'cksum',
+  // copy or archive it ELSEWHERE — a write among the operands is caught before this list
+  'cp', 'tar', 'zip', 'unzip', 'gzip', 'gunzip', 'ditto',
+  // say its name
+  'echo', 'printf', 'true', 'false', ':', 'test', '[',
+  // move around
+  'cd', 'pwd', 'pushd', 'popd',
+]);
 
 export type PolicyDecision = 'allow' | 'deny' | 'ask';
 export type PolicyMode = 'dry_run' | 'live';
@@ -348,18 +403,26 @@ export class PolicyEngine {
       //    <policy>/authority.json /tmp/` disables every rule on the floor in one
       //    command, so a source a verb removes counts as a mutation of where it was.
       for (const c of commands) if (c.writes.some(under) || c.removes.some(under)) return true;
-      // 2. The string heuristic, per segment, for a segment whose VERB resolved no
-      //    target — `busybox sed -i s/a/b/ <policy>/x` is a verb the parser does not
-      //    table. Gated on verbWrites, not writes: a bare `> /dev/null` resolves a path
-      //    without the parser having understood the verb, and treating the two the same
-      //    made "append a harmless redirect" a way past this test. When the VERB's own
-      //    target was read and it is elsewhere, trust it — `cp <policy>/authority.json
-      //    /tmp/mine.json` copies the rules out, which is a read.
+      // 2. THE INVERTED DEFAULT. A segment that names a path inside the policy
+      //    directory is denied unless its verb is a known reader. This is what closes
+      //    the class the previous string heuristic could only chase one verb at a time.
+      for (const c of commands) {
+        if (!this.segmentTouchesPolicy(c, dir, p.cwd)) continue;
+        if (c.unresolved.length) return true; // could not read it AND it names the dir
+        const verb = verbOf(c.argv);
+        const script = inlineScript(c.argv);
+        // An interpreter is judged by its script, not its name: a script that names the
+        // directory and writes is a write, even with the path built at run time.
+        if (script !== null) { if (scriptWrites(script)) return true; continue; }
+        if (!POLICY_READ_VERBS.has(verb)) return true;
+      }
+      // 3. The old string heuristic, per segment, still there for a segment that does
+      //    not resolve a policy path but looks like it mutates one anyway.
       for (const c of commands) {
         if (c.verbWrites.length) continue;
         if (c.text.includes(this.policyDir) && POLICY_WRITE_SHAPE.test(c.text)) return true;
       }
-      // 3. Only when the parser says it could not read this command do we fall back to
+      // 4. Only when the parser says it could not read this command do we fall back to
       //    the whole string, because then the segmentation above cannot be trusted.
       if (commands.some((c) => c.unresolved.length)) {
         return cmd.includes(this.policyDir) && POLICY_WRITE_SHAPE.test(cmd);
@@ -633,6 +696,26 @@ export class PolicyEngine {
    * tool call, so every error is swallowed. The file is the audit trail, not the
    * mechanism.
    */
+  /**
+   * Does this one command name a path inside the policy directory?
+   *
+   * Operands, redirection targets, and — for an inline script — the string literals in
+   * it. Resolved, so a relative path or a symlink counts. A MENTION does not: the
+   * operand of `echo "never edit <policy>/authority.json"` is a whole sentence, which
+   * resolves under the cwd rather than under the policy directory, so prose about the
+   * rules is not an attempt on them.
+   */
+  private segmentTouchesPolicy(c: EffectiveCommand, dir: string, cwd?: string): boolean {
+    const under = (path: string) => {
+      const abs = normalisePath(path, cwd);
+      return abs === dir || abs.startsWith(dir + '/');
+    };
+    if (c.writes.some(under) || c.removes.some(under)) return true;
+    const script = inlineScript(c.argv);
+    if (script !== null && scriptLiterals(script).some(under)) return true;
+    return operandsOf(c.argv).some(under);
+  }
+
   private appendLedger(row: Record<string, unknown>): void {
     if (!this.policyDir) return;
     try {

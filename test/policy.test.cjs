@@ -817,11 +817,10 @@ test('15b. policy-adjacent work is not denied because a verb sits elsewhere in t
 // bypasses it found, which is the lesson: a self-protection change has to be measured on
 // a corpus that CONTAINS policy writes, and mine did not.
 //
-// KNOWN OPEN, asserted nowhere so a later fix does not fail this test, and named in the
-// report's residual list: untabled in-place editors (`ed -s`, `ex -sc`, `vim -es`,
-// `python3 -m json.tool`) and an inline script whose path is behind a variable
-// (`node -e "const P=…; writeFileSync(P,…)"`). The class is open; table entries do not
-// close it.
+// All 25 are now stopped. The seven that a verb table could never catch — `ed -s`,
+// `ex -sc`, `vim -es`, `python3 -m json.tool`, and an inline script whose path is built
+// at run time — are closed by the INVERTED DEFAULT for this one directory (md-199g,
+// POLICY_READ_VERBS), not by another table entry. See test 19.
 
 test('16. every attack on the policy files that this branch claims to stop, stops', () => {
   const { e, root } = engine([]);
@@ -844,6 +843,14 @@ test('16. every attack on the policy files that this branch claims to stop, stop
     ['A19 sudo -u sed', `sudo -u gpinkham sed -i '' s/deny/allow/ ${D}/authority.json`],
     ['A20 rm the file', `rm ${D}/authority.json`],
     ['A21 cp over it', `cp /tmp/evil.json ${D}/authority.json`],
+    // The seven a verb table could not reach, closed by the inverted default.
+    ['A4 ed -s in place', `printf '1d\\nw\\n' | ed -s ${D}/authority.json > /tmp/o`],
+    ['A10 ex -sc in place', `ex -sc '%d|x' ${D}/authority.json`],
+    ['A11 vim -es in place', `vim -es -c '%d' -c wq ${D}/authority.json`],
+    ['A12 python3 -m json.tool over it', `python3 -m json.tool /tmp/evil.json ${D}/authority.json`],
+    ['A15 inline script, path in a const', `node -e "const P='${D}/authority.json'; require('fs').writeFileSync(P,'{}')"`],
+    ['A16 inline script, path in a var', `python3 -c "p='${D}/authority.json'; open(p,'w').write('{}')"`],
+    ['A17 inline script, path.join', `node -e "const j=require('path').join('${D}','authority.json'); require('fs').writeFileSync(j,'{}')"`],
     // A22-A25 — the wrapper value-flag bugs, per rule as well as per invariant.
     ['A22 sudo long flag first, then -u', `sudo --preserve-env=PATH -u gpinkham rm ${D}/authority.json`],
     ['A23 env -u wrapper', `env -u HOME rm ${D}/authority.json`],
@@ -976,6 +983,110 @@ test('18b. an inline assignment and an `sh -s` argument never reach the ledger',
   }
   const details = rows.filter((r) => r.kind === 'policy-unresolved').flatMap((r) => r.unresolved.map((u) => u.detail));
   assert.deepEqual(details, ['aws', 'sh', 'bash'], 'a program name is the whole contract');
+});
+
+// --- 19. The policy directory's inverted default (md-199g) ------------------
+
+test('19. an editor nobody has ever heard of cannot touch the policy files', () => {
+  const { e, root } = engine([]);
+  const D = path.join(root, 'policy');
+  // The point of the inversion: this is not a verb anyone tabled, and it never will be.
+  for (const command of [
+    `frobnicate --in-place ${D}/authority.json`,
+    `my-cool-editor -w ${D}/authority.json`,
+    `qed ${D}/authority.json`,
+    `/opt/homebrew/bin/some-future-sed -i s/deny/allow/ ${D}/authority.json`,
+    `npx some-json-rewriter ${D}/authority.json`,
+    `emacs --batch ${D}/authority.json -f save-buffer`
+  ]) {
+    const v = e.evaluate(pre('Bash', { command }, 'agent-a'));
+    assert.equal(v.decision, 'deny', command);
+    assert.equal(v.ruleId, 'policy-self-protection', command);
+  }
+});
+
+test('19b. every verb on the read allowlist can still read the rules', () => {
+  const { e, root } = engine([]);
+  const D = path.join(root, 'policy');
+  const f = `${D}/authority.json`;
+  for (const command of [
+    `cat ${f}`, `head -20 ${f}`, `tail -5 ${f}`, `nl ${f}`, `wc -l ${f}`,
+    `grep -n cross-agent ${f}`, `egrep 'deny|ask' ${f}`, `awk '/rules/' ${f}`,
+    `sed -n '1,5p' ${f}`, `jq '.rules[].id' ${f}`, `diff ${f} /tmp/copy.json`,
+    `cmp ${f} /tmp/copy.json`, `sort ${f}`, `uniq ${f}`, `cut -c1-40 ${f}`,
+    `ls -la ${D}`, `find ${D} -name '*.json'`, `stat ${f}`, `file ${f}`, `du -sh ${D}`,
+    `shasum ${f}`, `md5 ${f}`, `realpath ${f}`, `basename ${f}`, `dirname ${f}`,
+    `cp ${f} /tmp/mine.json`, `tar -tzf /tmp/p.tgz`, `zip -r /tmp/p.zip ${D}`,
+    `echo ${f}`, `printf '%s\n' ${f}`, `cd ${D}`,
+    // An interpreter is judged by its script: reading is fine.
+    `node -e "console.log(require('fs').readFileSync('${f}','utf8'))"`,
+    `python3 -c "print(open('${f}').read())"`,
+    `python3 -c "import sys; sys.stdout.write(open('${f}').read())"`
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command }, 'agent-a')).decision, 'allow', command);
+  }
+});
+
+test('19c. an interpreter is judged by its script, not by its name', () => {
+  const { e, root } = engine([]);
+  const D = path.join(root, 'policy');
+  const f = `${D}/authority.json`;
+  // Writes, even with the path assembled at run time and no literal target to extract.
+  for (const command of [
+    `node -e "const P='${f}'; require('fs').writeFileSync(P,'{}')"`,
+    `python3 -c "p='${f}'; open(p,'w').write('{}')"`,
+    `python3 -c "import shutil; shutil.copy('/tmp/evil.json','${f}')"`,
+    `node -e "require('fs').unlinkSync('${f}')"`,
+    `sh -c "rm ${f}"`
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command }, 'agent-a')).decision, 'deny', command);
+  }
+  // Reads, including the one whose `.write(` is a print.
+  for (const command of [
+    `node -e "console.log(require('fs').readFileSync('${f}'))"`,
+    `python3 -c "import sys; sys.stdout.write(open('${f}','r').read())"`,
+    `node -e "const r=/deny/.exec(require('fs').readFileSync('${f}','utf8'))"`
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command }, 'agent-a')).decision, 'allow', command);
+  }
+});
+
+test('19d. the inversion is for the policy directory ONLY', () => {
+  const { e, root } = engine([{
+    ...OWN_FOLDER_RULE,
+    match: { ...OWN_FOLDER_RULE.match, tool: ['Write', 'Edit', 'NotebookEdit', 'Bash'] }
+  }]);
+  const other = path.join(root, 'hive', 'agents', 'agent-b');
+  // Outside hive/policy the engine works the other way round: an unknown verb naming
+  // another agent's file is a MISS, documented on the residual list, not a deny.
+  assert.equal(e.evaluate(pre('Bash', { command: `frobnicate --in-place ${other}/memory.md` }, 'agent-a')).decision,
+    'allow', 'an unknown verb elsewhere is a known gap, not a deny');
+  assert.equal(e.evaluate(pre('Bash', { command: `ex -sc '%d|x' ${other}/memory.md` }, 'agent-a')).decision, 'allow');
+  // And an ordinary write there is still denied by the rule, as before.
+  assert.equal(e.evaluate(pre('Bash', { command: `echo x > ${other}/memory.md` }, 'agent-a')).decision, 'deny');
+});
+
+test('19e. a mention of the policy path is not an attempt on it', () => {
+  const { e, root } = engine([]);
+  const D = path.join(root, 'policy');
+  for (const command of [
+    `echo "never edit ${D}/authority.json"`,
+    `git commit -m "document ${D}/authority.json"`,
+    `echo 'see ${D}/README.md for the rules' >> /tmp/notes.md`
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command }, 'agent-a')).decision, 'allow', command);
+  }
+});
+
+test('19f. a segment that names the policy dir and could not be read fails closed', () => {
+  const { e, root } = engine([]);
+  const D = path.join(root, 'policy');
+  for (const command of [
+    `cat plan.txt | xargs cat ${D}/authority.json`,
+    `$(cat which) ${D}/authority.json`
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command }, 'agent-a')).decision, 'deny', command);
+  }
 });
 
 // --- the glob engine -------------------------------------------------------
