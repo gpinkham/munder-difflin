@@ -1089,6 +1089,63 @@ test('19f. a segment that names the policy dir and could not be read fails close
   }
 });
 
+// --- 20. md-199h: H1, H2 and the find hole ----------------------------------
+
+test('20. symlinking a colleague\'s file to read it is allowed; hard-linking it is not', () => {
+  const { e, root } = engine([{
+    ...OWN_FOLDER_RULE,
+    match: { ...OWN_FOLDER_RULE.match, tool: ['Write', 'Edit', 'NotebookEdit', 'Bash'] }
+  }]);
+  const A = path.join(root, 'hive', 'agents');
+  const bash = (command) => e.evaluate(pre('Bash', { command }, 'agent-a')).decision;
+  assert.equal(bash(`ln -s ${A}/agent-b/memory.md ${A}/agent-a/their-notes`), 'allow');
+  assert.equal(bash(`ln -s ${A}/agent-a/a.md ${A}/agent-a/latest`), 'allow');
+  assert.equal(bash(`ln ${A}/agent-b/memory.md /tmp/h`), 'deny', 'a hard link is a second name');
+});
+
+test('20b. a relative target with no cwd is logged, and the decision does not change', () => {
+  const { e, rows } = engine([{
+    ...OWN_FOLDER_RULE,
+    match: { ...OWN_FOLDER_RULE.match, tool: ['Write', 'Edit', 'NotebookEdit', 'Bash'] }
+  }]);
+  const v = e.evaluate(pre('Bash', { command: 'echo x > ../agent-b/memory.md' }, 'agent-a'));
+  assert.equal(v.decision, 'allow', 'pre-cwd behaviour, unchanged — this only makes it visible');
+  const row = rows.find((r) => r.kind === 'policy-unresolved');
+  assert.ok(row, 'but it no longer happens silently');
+  assert.deepEqual(row.codes, ['missing_cwd']);
+  assert.equal(row.decision, 'allow');
+});
+
+test('20c. missing_cwd does not re-arm the whole-string policy heuristic', () => {
+  // The regression this guards: every ordinary `cp a b` with no cwd looked structurally
+  // unreadable, which fell back to the whole string and denied a policy READ beside it.
+  const { e, root } = engine([]);
+  const D = path.join(root, 'policy');
+  assert.equal(e.evaluate(pre('Bash', { command: `cp a.json b.json && wc -l ${D}/decisions.jsonl` })).decision,
+    'allow');
+  assert.equal(e.evaluate(pre('Bash', { command: `rm scratch.json && cat ${D}/authority.json` })).decision,
+    'allow');
+  assert.equal(e.evaluate(pre('Bash', { command: `cp ${D}/authority.json mine.json` })).decision,
+    'allow', 'copying the rules out with a relative destination is still a read');
+});
+
+test('20d. find is a reader until it is given a mutating action', () => {
+  const { e, root } = engine([]);
+  const D = path.join(root, 'policy');
+  for (const command of [`find ${D} -name '*.json'`, `find ${D} -type f`, `find ${D} -newer /tmp/x`]) {
+    assert.equal(e.evaluate(pre('Bash', { command }, 'agent-a')).decision, 'allow', command);
+  }
+  for (const command of [
+    `find ${D} -delete`,
+    `find ${D} -name '*.json' -delete`,
+    `find ${D} -name '*.json' -exec truncate -s 0 {} +`,
+    `find ${D} -execdir rm {} ;`,
+    `find ${D} -fprint /tmp/out`
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command }, 'agent-a')).decision, 'deny', command);
+  }
+});
+
 // --- the glob engine -------------------------------------------------------
 
 test('globToRegExp: * stops at a separator, ** crosses it', () => {

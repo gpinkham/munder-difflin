@@ -11,7 +11,7 @@ const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 
-const { effectiveCommands, realAbsolute } = loadTs('src/main/shell.ts');
+const { effectiveCommands, realAbsolute, STRUCTURAL_UNRESOLVED } = loadTs('src/main/shell.ts');
 
 /** Every command the call runs, as normalised text. */
 const texts = (cmd, cwd) => effectiveCommands(cmd, cwd ?? '/work').map((c) => c.text);
@@ -337,6 +337,44 @@ test('G4. the ledger detail is a program name, never an inline assignment or an 
   assert.deepEqual(only('bash -s -- TOKEN123'), [{ code: 'piped_program', detail: 'bash' }]);
   assert.deepEqual(only('bash ./deploy.sh'), [{ code: 'program_from_file', detail: './deploy.sh' }],
     'a real script path is still named');
+});
+
+test('H1. a symlink does not mutate what it points at; a hard link does', () => {
+  const one = (cmd) => effectiveCommands(cmd, '/work')[0];
+  assert.deepEqual(one('ln -s /a/f /mine/handle').removes, [],
+    'symlinking a file to READ it is not a write to it');
+  assert.deepEqual(one('ln --symbolic /a/f /mine/handle').removes, []);
+  assert.deepEqual(one('ln -sf /a/f /mine/handle').removes, []);
+  assert.deepEqual(one('ln /a/f /tmp/h').removes, ['/a/f'], 'a hard link still is');
+  // The write-through case is covered at write time instead: realAbsolute resolves the
+  // link, so writing through the handle lands on the real path.
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'md199h-')));
+  fs.mkdirSync(path.join(root, 'theirs'));
+  fs.writeFileSync(path.join(root, 'theirs', 'memory.md'), 'x');
+  fs.symlinkSync(path.join(root, 'theirs', 'memory.md'), path.join(root, 'handle'));
+  assert.deepEqual(writes(`echo x > ${root}/handle`), [`${root}/theirs/memory.md`]);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('H2. a relative target with no cwd is a blind spot that says so', () => {
+  const codes = (cmd, cwd) => effectiveCommands(cmd, cwd).flatMap((c) => c.unresolved.map((u) => u.code));
+  assert.deepEqual(codes('echo x > ../kelly/memory.md'), ['missing_cwd'],
+    'resolved against this process, which is not where the agent is standing');
+  assert.deepEqual(codes('cp a.md ../kelly/a.md'), ['missing_cwd']);
+  assert.deepEqual(codes('mv ../kelly/memory.md /tmp/p.md'), ['missing_cwd']);
+  // With a cwd there is nothing to report, and an absolute target never needed one.
+  assert.deepEqual(codes('echo x > ../kelly/memory.md', '/work/agents/jim'), []);
+  assert.deepEqual(codes('echo x > /abs/memory.md'), []);
+  assert.deepEqual(codes('echo hello'), []);
+});
+
+test('H2b. a path-value blind spot is not a structural one', () => {
+  // The difference decides whether a caller may reason about the whole command string.
+  assert.equal(STRUCTURAL_UNRESOLVED.has('missing_cwd'), false);
+  assert.equal(STRUCTURAL_UNRESOLVED.has('unexpanded_variable'), false);
+  for (const c of ['stdin_operand', 'substitution_output', 'piped_program', 'program_from_file', 'alias_definition']) {
+    assert.equal(STRUCTURAL_UNRESOLVED.has(c), true, c);
+  }
 });
 
 // --- 3. honesty and robustness ------------------------------------------------

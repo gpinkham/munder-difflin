@@ -56,7 +56,28 @@ export type UnresolvedCode =
   /** The command defines a name whose expansion we will never see — `alias gp=…`. */
   | 'alias_definition'
   /** A path still holds a variable we never saw assigned — `$AGENT_DIR/memory.md`. */
-  | 'unexpanded_variable';
+  | 'unexpanded_variable'
+  /**
+   * A RELATIVE target, and nobody told us which directory to resolve it against, so it
+   * was resolved against this process's — which is not where the agent is standing. The
+   * hook payload carries `cwd`; a caller that omits it silently gets the behaviour that
+   * existed before it was threaded through, and this is what makes that visible instead.
+   */
+  | 'missing_cwd';
+
+/**
+ * Codes that mean the command's STRUCTURE may be wrong — we could not see which program
+ * runs or which operands it gets — as opposed to codes that mean one PATH's value is a
+ * guess (`unexpanded_variable`, `missing_cwd`), where the parse itself is sound.
+ *
+ * The difference decides whether a caller may fall back to reasoning about the whole
+ * command string. It is load-bearing: when `missing_cwd` was first added, every ordinary
+ * `cp a b` with no cwd looked structurally unreadable, which re-armed a whole-string
+ * heuristic and reintroduced a false positive that had already been fixed once.
+ */
+export const STRUCTURAL_UNRESOLVED: ReadonlySet<UnresolvedCode> = new Set<UnresolvedCode>([
+  'stdin_operand', 'substitution_output', 'piped_program', 'program_from_file', 'alias_definition',
+]);
 
 export interface Unresolved {
   code: UnresolvedCode;
@@ -141,10 +162,17 @@ const BASENAME_ALIAS: Record<string, string> = {
 /**
  * Verbs whose SOURCE operands are mutated, not merely read.
  *
- * `mv` removes what it moves; `ln` (a hard link, and a symlink too) hands out a second
- * name for the same file, and a later write through that name is invisible to a rule
- * looking at the original path. `cp`, `tar` and `zip` are absent on purpose — reading a
- * file to copy it elsewhere IS a read, which is why copying the rules out stays allowed.
+ * `mv` removes what it moves; a HARD link (`ln` with no `-s`) makes a second name for
+ * the same inode, and a write through that name is invisible to a rule looking at the
+ * original path. `cp`, `tar` and `zip` are absent on purpose — reading a file to copy it
+ * elsewhere IS a read, which is why copying the rules out stays allowed.
+ *
+ * A SYMLINK is absent too, and that is a correction: `ln -s <other agent>/memory.md
+ * <mine>/their-notes` was denied, and it is the ordinary way to keep a handle on
+ * something you are READING. The write-through worry it was covering is already handled
+ * at the right moment — `realAbsolute` resolves symlinks, so a later `echo x >
+ * <mine>/their-notes` normalises onto the real path and is denied at WRITE time.
+ * Covering it again at link time bought nothing and cost a read.
  */
 const SOURCE_MUTATED = new Set(['mv', 'ln']);
 
@@ -400,6 +428,8 @@ function readBalanced(src: string, from: number, open: string, close: string): [
 interface Ctx {
   env: Map<string, string>;
   cwd: string;
+  /** False when the caller gave us no cwd, so a relative path is a guess. */
+  cwdKnown: boolean;
   depth: number;
   out: EffectiveCommand[];
 }
@@ -488,7 +518,7 @@ export function realAbsolute(p: string, cwd: string): string {
  * subject — degrading to the old behaviour rather than to "no command at all".
  */
 export function effectiveCommands(command: string, cwd?: string): EffectiveCommand[] {
-  const ctx: Ctx = { env: new Map(), cwd: cwd || process.cwd(), depth: 0, out: [] };
+  const ctx: Ctx = { env: new Map(), cwd: cwd || process.cwd(), cwdKnown: !!cwd, depth: 0, out: [] };
   try {
     walk(prepare(command), ctx);
   } catch {
@@ -756,6 +786,8 @@ function verbTargets(base: string, argv: string[]): string[] {
 /** Operands a source-mutating verb takes away: everything but its destination. */
 function sourceTargets(base: string, argv: string[]): string[] {
   if (!SOURCE_MUTATED.has(base) && !(base === 'rsync' && argv.includes('--remove-source-files'))) return [];
+  // `ln -s` makes a symlink, which does not touch what it points at.
+  if (base === 'ln' && argv.some((a, i) => i > 0 && (/^-[a-zA-Z]*s/.test(a) || a === '--symbolic'))) return [];
   const operands: string[] = [];
   const takesValue = VALUE_FLAGS[base] ?? new Set<string>();
   for (let i = 1; i < argv.length; i++) {
@@ -898,6 +930,13 @@ function record(
 ): void {
   if (ctx.out.length >= MAX_COMMANDS) return;
   const abs = (w: string) => realAbsolute(w, ctx.cwd);
+  // A relative target is only as good as the directory we resolved it against. With no
+  // cwd from the caller that directory is this process's, which is not the agent's.
+  const guessed = ctx.cwdKnown
+    ? []
+    : [...writes, ...removes]
+        .filter((w) => !isAbsolute(w) && !w.startsWith('~') && !w.includes('$'))
+        .map((w): Unresolved => ({ code: 'missing_cwd', detail: w.slice(0, 200) }));
   ctx.out.push({
     argv,
     text: argv.map(requote).join(' '),
@@ -906,6 +945,6 @@ function record(
     removes: removes.map(abs),
     // A target holding `$SOMETHING` was resolved against a name we never saw, so the
     // absolute path above is a guess at best. Say so rather than only recording it.
-    unresolved: [...unresolved, ...unexpandedVars(writes)],
+    unresolved: [...unresolved, ...unexpandedVars(writes), ...guessed],
   });
 }

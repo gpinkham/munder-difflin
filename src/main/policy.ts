@@ -46,7 +46,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import {
   effectiveCommands, realAbsolute, inlineScript, scriptLiterals, scriptWrites, operandsOf, verbOf,
-  type EffectiveCommand, type Unresolved,
+  STRUCTURAL_UNRESOLVED, type EffectiveCommand, type Unresolved,
 } from './shell';
 
 /** Where a rule's path matcher reads its subject from, per tool. */
@@ -121,6 +121,18 @@ const MAX_UNRESOLVED_PER_ROW = 20;
  * (see `interpreterTouchesPolicy`) — reading the rules from a script stays allowed,
  * writing them from one does not, even when the path is assembled at run time.
  */
+/**
+ * Verbs on the list above that stop being readers when given a particular flag.
+ *
+ * `find` is the one that matters: `find <dir> -name '*.json'` is a read and `find <dir>
+ * -delete` empties the directory, under the same verb. Listing `find` without this was a
+ * hole I opened in the allowlist itself, not an open class — a read verb with a mutating
+ * mode belongs here, next to the list that vouches for it.
+ */
+const POLICY_READ_VERB_UNLESS: Record<string, RegExp> = {
+  find: /^(?:-delete|-exec|-execdir|-ok|-okdir|-fprint|-fprintf|-fls)$/,
+};
+
 export const POLICY_READ_VERBS = new Set([
   // read a file
   'cat', 'bat', 'head', 'tail', 'less', 'more', 'nl', 'od', 'xxd', 'strings', 'fold',
@@ -188,6 +200,15 @@ export interface PolicyPayload {
    * a path under the app's working directory and matched nothing. Only an explicit
    * absolute `cd` in the same command rescued it. It can also misfire the other way,
    * if the daemon's cwd ever sits inside some agent's folder.
+   *
+   * SECURITY-RELEVANT AND AGENT-CONTROLLED. This value is read straight from the hook
+   * payload, so an agent that wants to can send a `cwd` that is not where it is — `/`,
+   * `/tmp`, `""` — and turn a relative cross-agent write back into an allow. That sits
+   * inside the declared threat model at the top of this file (the transport is fail-open
+   * by construction; this is a salience aid against disguise and forgetfulness, not a
+   * sandbox against a hostile agent), but it is a NEW field in that category and worth
+   * naming rather than leaving to be discovered. A cwd that is merely MISSING is
+   * different: that is recorded as an `missing_cwd` blind spot in the ledger.
    */
   cwd?: string;
 }
@@ -408,13 +429,18 @@ export class PolicyEngine {
       //    the class the previous string heuristic could only chase one verb at a time.
       for (const c of commands) {
         if (!this.segmentTouchesPolicy(c, dir, p.cwd)) continue;
-        if (c.unresolved.length) return true; // could not read it AND it names the dir
+        // Could not read the command AND it names the directory. Only a STRUCTURAL blind
+        // spot counts: a path whose value is a guess does not mean the parse is wrong,
+        // and `cp <policy>/authority.json mine.json` is still a read.
+        if (c.unresolved.some((u) => STRUCTURAL_UNRESOLVED.has(u.code))) return true;
         const verb = verbOf(c.argv);
         const script = inlineScript(c.argv);
         // An interpreter is judged by its script, not its name: a script that names the
         // directory and writes is a write, even with the path built at run time.
         if (script !== null) { if (scriptWrites(script)) return true; continue; }
         if (!POLICY_READ_VERBS.has(verb)) return true;
+        const unless = POLICY_READ_VERB_UNLESS[verb];
+        if (unless && c.argv.slice(1).some((a) => unless.test(a))) return true;
       }
       // 3. The old string heuristic, per segment, still there for a segment that does
       //    not resolve a policy path but looks like it mutates one anyway.
@@ -424,7 +450,7 @@ export class PolicyEngine {
       }
       // 4. Only when the parser says it could not read this command do we fall back to
       //    the whole string, because then the segmentation above cannot be trusted.
-      if (commands.some((c) => c.unresolved.length)) {
+      if (commands.some((c) => c.unresolved.some((u) => STRUCTURAL_UNRESOLVED.has(u.code)))) {
         return cmd.includes(this.policyDir) && POLICY_WRITE_SHAPE.test(cmd);
       }
       return false;
