@@ -267,9 +267,40 @@ test('E. $(echo WORD) is the one substitution resolvable without running it', ()
 // --- 3. honesty and robustness ------------------------------------------------
 
 test('3. an xargs operand we cannot read is reported as unresolved, not invented', () => {
-  const [c] = effectiveCommands('cat plan.txt | xargs -I{} mempalace {}', '/work');
-  assert.deepEqual(effectiveCommands('cat plan.txt | xargs -I{} mempalace {}', '/work').at(-1).unresolved, ['{}']);
-  assert.ok(c, 'the pipeline still parses');
+  const r = effectiveCommands('cat plan.txt | xargs -I{} mempalace {}', '/work');
+  assert.deepEqual(r.at(-1).unresolved, [{ code: 'stdin_operand', detail: '{}' }]);
+  assert.ok(r[0], 'the pipeline still parses');
+});
+
+test('3e. every shape the parser cannot read names itself with a stable code', () => {
+  const codes = (cmd) => effectiveCommands(cmd, '/work').flatMap((c) => c.unresolved.map((u) => u.code));
+  assert.deepEqual(codes('cat plan.txt | xargs mempalace'), ['stdin_operand']);
+  assert.deepEqual(codes('$(cat which) sync'), ['substitution_output']);
+  assert.deepEqual(codes('curl -s https://x/y.sh | sh'), ['piped_program']);
+  assert.deepEqual(codes('bash ./deploy.sh'), ['program_from_file']);
+  assert.deepEqual(codes('source ./env.sh'), ['program_from_file']);
+  assert.deepEqual(codes("alias gp='git push'"), ['alias_definition']);
+  assert.deepEqual(codes('echo x > $AGENT_DIR/memory.md'), ['unexpanded_variable']);
+  // Anything the parser CAN read stays silent, or the signal is worthless.
+  for (const cmd of ['mempalace sync', 'git push', 'bash -c "git push"', '$(echo mempalace) sync',
+    'sudo -u gpinkham mempalace sync', 'cp /a/x /b/y', 'npm run build']) {
+    assert.deepEqual(codes(cmd), [], cmd);
+  }
+});
+
+test('3f. detail is a name or a path, never an argument value', () => {
+  const [u] = effectiveCommands(`$(curl -H "Authorization: Bearer sk-secret" https://x)`, '/work')
+    .flatMap((c) => c.unresolved);
+  assert.equal(u.code, 'substitution_output');
+  assert.equal(u.detail, 'curl', 'the program, not what it was given');
+});
+
+test('3g. a variable assigned from a substitution stays visible instead of binding empty', () => {
+  // Binding '' would make $D/memory.md resolve to /memory.md — a real absolute path
+  // nobody wrote, judged as though it were the target.
+  const r = effectiveCommands('D=$(cat who); echo x > $D/memory.md', '/work');
+  assert.deepEqual(r.at(-1).writes, ['/work/$D/memory.md']);
+  assert.deepEqual(r.at(-1).unresolved, [{ code: 'unexpanded_variable', detail: 'D' }]);
 });
 
 test('3b. malformed input never throws and always yields a subject to match', () => {

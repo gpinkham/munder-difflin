@@ -32,6 +32,38 @@ import { homedir } from 'node:os';
 import { realpathSync } from 'node:fs';
 import { isAbsolute, resolve, dirname, basename, sep } from 'node:path';
 
+/**
+ * Something in this command the parser could not pin down.
+ *
+ * `code` is a STABLE identifier, meant to be grepped and counted in the ledger — it
+ * is part of this module's contract, so renaming one is a schema change.
+ *
+ * `detail` is a STRUCTURAL token only: a placeholder, a program or variable NAME, or
+ * a path. Never an argument value. That line exists because these rows are written to
+ * a file an operator reads, and a command's arguments carry file contents, tokens and
+ * secrets — the same reason `policy.ts` logs a digest of a tool input rather than the
+ * input. A program name tells a reader what happened; its arguments do not need to.
+ */
+export type UnresolvedCode =
+  /** An operand arrives on stdin we cannot read — `cat plan | xargs mempalace`. */
+  | 'stdin_operand'
+  /** A word is the OUTPUT of another command — `$(cat which) sync`. */
+  | 'substitution_output'
+  /** The program itself arrives on a pipe — `curl -s … | sh`. */
+  | 'piped_program'
+  /** The program is a file we do not read — `bash ./deploy.sh`, `source env.sh`. */
+  | 'program_from_file'
+  /** The command defines a name whose expansion we will never see — `alias gp=…`. */
+  | 'alias_definition'
+  /** A path still holds a variable we never saw assigned — `$AGENT_DIR/memory.md`. */
+  | 'unexpanded_variable';
+
+export interface Unresolved {
+  code: UnresolvedCode;
+  /** A placeholder, program name, variable name or path — never an argument value. */
+  detail: string;
+}
+
 /** One command the Bash call would actually run. */
 export interface EffectiveCommand {
   /** argv after prefix stripping, basename-ing of argv[0] and variable expansion. */
@@ -40,8 +72,8 @@ export interface EffectiveCommand {
   text: string;
   /** Absolute paths this command writes. Directory targets keep a trailing `/`. */
   writes: string[];
-  /** A write target we could not pin down (an xargs placeholder, an unset variable). */
-  unresolved: string[];
+  /** What this command hides from us. Logged, never enforced on — see policy.ts. */
+  unresolved: Unresolved[];
 }
 
 /** Guards against a pathological command turning one hook call into a hang. */
@@ -391,7 +423,7 @@ export function effectiveCommands(command: string, cwd = process.cwd()): Effecti
   }
   if (!ctx.out.length) {
     const argv = command.trim().split(/\s+/).filter(Boolean);
-    return [{ argv, text: command.trim(), writes: [], unresolved: [] }];
+    return [{ argv, text: command.trim(), writes: [], unresolved: [] as Unresolved[] }];
   }
   return ctx.out;
 }
@@ -443,7 +475,10 @@ function simple(toks: Tok[], ctx: Ctx): void {
     for (const s of t.subs) subs.push(s);
     if (leading && !t.q && /^\w+=/.test(t.v)) {
       const eq = t.v.indexOf('=');
-      ctx.env.set(t.v.slice(0, eq), expand(t.v.slice(eq + 1), ctx.env));
+      // `D=$(cat who)` — the value is a command's output. Binding the rest of the word
+      // ('' here) would make `$D/memory.md` resolve to `/memory.md`: a real absolute
+      // path that nobody wrote. Leave the name unset so `$D` stays visible instead.
+      if (!t.subs.length) ctx.env.set(t.v.slice(0, eq), expand(t.v.slice(eq + 1), ctx.env));
       continue;
     }
     const w = expand(t.v, ctx.env);
@@ -454,16 +489,20 @@ function simple(toks: Tok[], ctx: Ctx): void {
 
   // `$(…)` and backticks run their own commands, whatever the outer one does.
   for (const s of subs) walk(prepare(s), { ...ctx, depth: ctx.depth + 1 });
+  // …and the OUTER word is that command's output, which we do not have. resolveEcho
+  // has already handled the one case we can compute, so anything left here is a real
+  // blind spot: `$(cat which) sync` is a command whose name we never learn.
+  const hidden: Unresolved[] = subs.map((x) => ({ code: 'substitution_output', detail: programOf(x) }));
 
   if (!argv.length) {
-    if (redirects.length) record(ctx, [], redirects, []);
+    if (redirects.length) record(ctx, [], redirects, hidden);
     return;
   }
-  dispatch(argv, redirects, herestring, ctx);
+  dispatch(argv, redirects, herestring, ctx, hidden);
 }
 
 /** Resolve wrappers down to the command that actually runs, then record it. */
-function dispatch(argv: string[], redirects: string[], herestring: string | null, ctx: Ctx): void {
+function dispatch(argv: string[], redirects: string[], herestring: string | null, ctx: Ctx, hidden: Unresolved[] = []): void {
   if (ctx.depth > MAX_DEPTH || ctx.out.length >= MAX_COMMANDS) return;
   const deeper = { ...ctx, depth: ctx.depth + 1 };
 
@@ -471,7 +510,7 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
   // variable so the body's `$c` expands. One binding per value, first wins.
   if (argv[0] === 'for' && argv[1] && argv[2] === 'in' && argv[3]) { ctx.env.set(argv[1], argv[3]); return; }
   if (argv[0] === 'while' || argv[0] === 'until' || argv[0] === 'if' || argv[0] === 'case') {
-    return dispatch(argv.slice(1), redirects, herestring, ctx);
+    return dispatch(argv.slice(1), redirects, herestring, ctx, hidden);
   }
 
   let head = argv[0];
@@ -481,7 +520,7 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
     let i = 1;
     while (i < argv.length && /^\w+=/.test(argv[i])) { const eq = argv[i].indexOf('='); ctx.env.set(argv[i].slice(0, eq), argv[i].slice(eq + 1)); i++; }
     while (i < argv.length && argv[i].startsWith('-')) i++;
-    if (i < argv.length) return dispatch(argv.slice(i), redirects, herestring, ctx);
+    if (i < argv.length) return dispatch(argv.slice(i), redirects, herestring, ctx, hidden);
     return;
   }
   const wrapper = TRANSPARENT[basename(head)];
@@ -494,13 +533,13 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
     while (i < argv.length && argv[i].startsWith('--') && argv[i].includes('=')) i++;
     // `script /dev/null cmd …` records into that file; only what follows is a command.
     if (wrapper.firstOperandIsFile && i + 1 < argv.length) i++;
-    if (i < argv.length) return dispatch(argv.slice(i), redirects, herestring, ctx);
+    if (i < argv.length) return dispatch(argv.slice(i), redirects, herestring, ctx, hidden);
     return;
   }
   if (basename(head) === 'timeout') {
     let i = 1;
     while (i < argv.length && (argv[i].startsWith('-') || /^[\d.]+[smhd]?$/.test(argv[i]))) i++;
-    if (i < argv.length) return dispatch(argv.slice(i), redirects, herestring, ctx);
+    if (i < argv.length) return dispatch(argv.slice(i), redirects, herestring, ctx, hidden);
     return;
   }
   if (basename(head) === 'eval') {
@@ -520,10 +559,10 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
     const inner = argv.slice(i);
     if (!inner.length) return;
     const words = herestring === null ? null : herestring.split(/\s+/).filter(Boolean);
-    if (token && words) return dispatch(inner.flatMap((a) => (a === token ? words : [a])), redirects, null, ctx);
-    if (!token && words) return dispatch([...inner, ...words], redirects, null, ctx);
+    if (token && words) return dispatch(inner.flatMap((a) => (a === token ? words : [a])), redirects, null, ctx, hidden);
+    if (!token && words) return dispatch([...inner, ...words], redirects, null, ctx, hidden);
     // stdin we cannot see: record it as it stands and say the operand is unknown.
-    record(ctx, inner, redirects, token ? [token] : ['<stdin>']);
+    record(ctx, inner, redirects, [{ code: 'stdin_operand', detail: token ?? '(appended)' }]);
     return;
   }
 
@@ -531,27 +570,45 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
   if (SHELL_DASH_C.has(base)) {
     const ci = argv.findIndex((a, k) => k > 0 && (a === '-c' || a === '-lc' || a === '-cl'));
     if (ci !== -1 && argv[ci + 1] !== undefined) { walk(prepare(argv[ci + 1]), deeper); return; }
+    // No -c: the program is a script FILE we do not open, or it is stdin — which is
+    // what `curl … | sh` is. Either way every command it runs is invisible here.
+    const file = argv.slice(1).find((a) => !a.startsWith('-'));
+    hidden = [...hidden, file
+      ? { code: 'program_from_file', detail: file.slice(0, 200) }
+      : { code: 'piped_program', detail: base }];
+  }
+  if (base === 'source' || base === '.') {
+    const file = argv[1];
+    if (file) hidden = [...hidden, { code: 'program_from_file', detail: file.slice(0, 200) }];
+  }
+  // `alias gp='git push'` / `gp() { git push; }` — the name is ours to see, its later
+  // use is not, because a parser only ever gets one command at a time.
+  if (base === 'alias' && argv[1]) {
+    hidden = [...hidden, { code: 'alias_definition', detail: argv[1].split('=')[0].slice(0, 60) }];
+  }
+  if (base === 'function' && argv[1]) {
+    hidden = [...hidden, { code: 'alias_definition', detail: argv[1].slice(0, 60) }];
   }
   if ((base === 'python' || base === 'python3' || base === 'python2') && argv[1] === '-m' && argv[2]) {
     // `python3 -m mempalace sync` IS `mempalace sync`.
-    return dispatch([argv[2], ...argv.slice(3)], redirects, herestring, ctx);
+    return dispatch([argv[2], ...argv.slice(3)], redirects, herestring, ctx, hidden);
   }
   const inlineFlags = INLINE_SCRIPT[base];
   if (inlineFlags) {
     const fi = argv.findIndex((a, k) => k > 0 && inlineFlags.includes(a));
     if (fi !== -1 && argv[fi + 1] !== undefined) {
       const script = argv[fi + 1];
-      record(ctx, [base, ...argv.slice(1)], [...redirects, ...inlineTargets(script)], []);
+      record(ctx, [base, ...argv.slice(1)], [...redirects, ...inlineTargets(script)], hidden);
       // A string the script hands to a shell is a command, so parse it as one.
       for (const m of script.matchAll(EXEC_API)) walk(prepare(m[2]), deeper);
       return;
     }
   }
-  if (base === 'cd' && argv[1]) { ctx.cwd = realAbsolute(argv[1], ctx.cwd); record(ctx, [base, ...argv.slice(1)], redirects, []); return; }
+  if (base === 'cd' && argv[1]) { ctx.cwd = realAbsolute(argv[1], ctx.cwd); record(ctx, [base, ...argv.slice(1)], redirects, hidden); return; }
 
   // `git -C dir …` runs in dir; it writes no path we track, but a later command in
   // the same line does not inherit that, so only argv is normalised here.
-  record(ctx, [base, ...argv.slice(1)], [...redirects, ...verbTargets(base, argv)], []);
+  record(ctx, [base, ...argv.slice(1)], [...redirects, ...verbTargets(base, argv)], hidden);
 }
 
 /** Paths a known mutating verb writes, given its argv. */
@@ -635,12 +692,29 @@ function inlineTargets(script: string): string[] {
   return out;
 }
 
-function record(ctx: Ctx, argv: string[], writes: string[], unresolved: string[]): void {
+/** The first word of a command string — a program name, safe to put in a ledger. */
+function programOf(src: string): string {
+  const [first] = src.trim().split(/\s+/);
+  return (first ?? '').slice(0, 60) || '(empty)';
+}
+
+/** Variable names still unexpanded in these words, if any. */
+function unexpandedVars(words: string[]): Unresolved[] {
+  const out: Unresolved[] = [];
+  for (const w of words) {
+    for (const m of w.matchAll(/\$\{?(\w+)\}?/g)) out.push({ code: 'unexpanded_variable', detail: m[1] });
+  }
+  return out;
+}
+
+function record(ctx: Ctx, argv: string[], writes: string[], unresolved: Unresolved[]): void {
   if (ctx.out.length >= MAX_COMMANDS) return;
   ctx.out.push({
     argv,
     text: argv.map(requote).join(' '),
     writes: writes.map((w) => realAbsolute(w, ctx.cwd)),
-    unresolved,
+    // A target holding `$SOMETHING` was resolved against a name we never saw, so the
+    // absolute path above is a guess at best. Say so rather than only recording it.
+    unresolved: [...unresolved, ...unexpandedVars(writes)],
   });
 }

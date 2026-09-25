@@ -33,14 +33,18 @@
  * were simply different strings from the ones the rules described — measured at
  * 81.5% of disguised violations wrongly allowed (md-188), 0.6% after (md-199).
  * The parser is a normaliser, not a sandbox: see its own header for what it does
- * not claim to catch.
+ * not claim to catch. What it CANNOT see, it says so about: a Bash call whose target
+ * or program the parser could not pin down gets an `event: "unresolved"` row in the
+ * ledger, carrying a stable reason code. That row changes no decision — it exists so
+ * the size and shape of the blind spot is a number an operator can read rather than a
+ * paragraph in a report.
  *
  * Runs in the Electron main process, called from HookServer.handle().
  */
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, appendFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { effectiveCommands, realAbsolute, type EffectiveCommand } from './shell';
+import { effectiveCommands, realAbsolute, type EffectiveCommand, type Unresolved } from './shell';
 
 /** Where a rule's path matcher reads its subject from, per tool. */
 const PATH_FIELDS = ['file_path', 'notebook_path', 'path'] as const;
@@ -75,6 +79,9 @@ const POLICY_WRITE_SHAPE =
 
 /** How long between `policy-stats` rollups. Flushed lazily, so no timer. */
 const STATS_INTERVAL_MS = 60 * 60 * 1000;
+
+/** At most this many blind spots per row. A pathological command cannot flood a file. */
+const MAX_UNRESOLVED_PER_ROW = 20;
 
 export type PolicyDecision = 'allow' | 'deny' | 'ask';
 export type PolicyMode = 'dry_run' | 'live';
@@ -368,9 +375,19 @@ export class PolicyEngine {
     if (p.hook_event_name !== 'PreToolUse') return { decision: 'allow' };
     if (!this.configured) return { decision: 'allow' }; // unconfigured → byte-identical
 
+    const ctx: EvalContext = { commands: null };
+    const verdict = this.decide(p, ctx);
+    // AFTER the verdict, and it cannot change it — the row carries the decision that
+    // was actually returned, so a reader can tell a blind spot that was allowed from
+    // one a rule caught anyway.
+    this.recordUnresolved(p, ctx, verdict);
+    return verdict;
+  }
+
+  /** The rules, in order. Split out so every return path is one `evaluate` call. */
+  private decide(p: PolicyPayload, ctx: EvalContext): PolicyVerdict {
     this.stats.evaluated++;
     this.maybeFlushStats();
-    const ctx: EvalContext = { commands: null };
 
     // Invariant, ahead of user rules and not overridable by config: an agent that
     // can edit the policy file makes every rule advisory. This holds even with no
@@ -517,6 +534,72 @@ export class PolicyEngine {
     });
   }
 
+  /**
+   * One `unresolved` row per Bash payload the parser could not fully read.
+   *
+   * NO DECISION IS TAKEN FROM THIS. Failing closed on an unreadable command is a
+   * separate call with a real cost — every `curl | sh` in ordinary build work would
+   * start asking — so this deliberately only counts. `event: "unresolved"` and the
+   * `codes` array are the query surface: `jq 'select(.event=="unresolved") | .codes'`
+   * over the ledger answers "what are we blind to, and how often" without reading
+   * prose.
+   *
+   * What is NOT in the row: the command. Rows go to a file an operator reads, and an
+   * argument carries file contents and secrets — the same reason `record()` logs a
+   * digest instead of the tool input. Each blind spot contributes a reason code and a
+   * structural token (a placeholder, a program or variable NAME, a path), and the
+   * digest ties the row back to the call if someone needs the rest.
+   */
+  private recordUnresolved(p: PolicyPayload, ctx: EvalContext, v: PolicyVerdict): void {
+    if (p.tool_name !== 'Bash') return;
+    const commands = ctx.commands;
+    if (!commands?.length) return; // nothing was parsed, so nothing was hidden
+
+    const seen = new Set<string>();
+    const blind: Unresolved[] = [];
+    for (const c of commands) {
+      for (const u of c.unresolved) {
+        const key = `${u.code}\u0000${u.detail}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (blind.length < MAX_UNRESOLVED_PER_ROW) blind.push(u);
+      }
+    }
+    if (!blind.length) return;
+
+    const row = {
+      kind: 'policy-unresolved',
+      event: 'unresolved',
+      agent_id: p.agent_id ?? null,
+      tool: p.tool_name,
+      decision: v.decision,
+      rule_id: v.ruleId ?? null,
+      codes: [...new Set(blind.map((u) => u.code))].sort(),
+      unresolved: blind,
+      input_digest: digest(p.tool_input),
+    };
+    this.log(row);
+    this.appendLedger(row);
+  }
+
+  /**
+   * Mirror a row into `<hive>/policy/decisions.jsonl`, the ledger an operator already
+   * reads (the shell guardrail writes its `event: "firing"` rows there).
+   *
+   * Best effort by construction: a ledger that cannot be written must never fail a
+   * tool call, so every error is swallowed. The file is the audit trail, not the
+   * mechanism.
+   */
+  private appendLedger(row: Record<string, unknown>): void {
+    if (!this.policyDir) return;
+    try {
+      appendFileSync(
+        join(this.policyDir, 'decisions.jsonl'),
+        JSON.stringify({ id: ledgerId(), ts: new Date().toISOString(), ...row }) + '\n'
+      );
+    } catch { /* the ledger is evidence, never a dependency */ }
+  }
+
   private maybeFlushStats(): void {
     if (Date.now() - this.lastStatsFlush < STATS_INTERVAL_MS) return;
     this.flushStats();
@@ -542,6 +625,11 @@ export class PolicyEngine {
   get ruleCount(): number { return this.rules.length; }
   get error(): string | null { return this.loadError; }
   get path(): string { return this.policyPath; }
+}
+
+/** The ledger's id shape, matching the rows the shell guardrail already writes. */
+function ledgerId(): string {
+  return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
 }
 
 /** sha256 of the tool input, so a row is correlatable without storing content. */
