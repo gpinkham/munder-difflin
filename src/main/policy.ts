@@ -386,7 +386,16 @@ export class PolicyEngine {
       const v = input[f];
       if (typeof v === 'string' && v) out.push(v);
     }
-    if (p.tool_name === 'Bash') for (const c of this.commands(p, ctx)) out.push(...c.writes);
+    if (p.tool_name === 'Bash') {
+      for (const c of this.commands(p, ctx)) {
+        out.push(...c.writes);
+        // …and the paths a verb takes AWAY. `mv <other agent>/memory.md /tmp/` destroys
+        // their file as surely as writing over it, and an ownership rule that only looks
+        // at where a write LANDS calls that a read. Same principle the policy invariant
+        // needed; there is no reason it stops at the policy directory.
+        out.push(...c.removes);
+      }
+    }
     return out;
   }
 

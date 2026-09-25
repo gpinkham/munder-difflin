@@ -924,6 +924,23 @@ test('17b. a Write path field is relative to the agent too, and no cwd still wor
   }, 'agent-a')).decision, 'deny');
 });
 
+test('17c. taking another agent\'s file away is a write to their folder', () => {
+  const { e, root } = engine([{
+    ...OWN_FOLDER_RULE,
+    match: { ...OWN_FOLDER_RULE.match, tool: ['Write', 'Edit', 'NotebookEdit', 'Bash'] }
+  }]);
+  const A = path.join(root, 'hive', 'agents');
+  const bash = (command) => e.evaluate(pre('Bash', { command }, 'agent-a')).decision;
+  assert.equal(bash(`mv ${A}/agent-b/memory.md /tmp/parked.md`), 'deny');
+  assert.equal(bash(`mv -t /tmp ${A}/agent-b/memory.md`), 'deny');
+  assert.equal(bash(`ln ${A}/agent-b/memory.md /tmp/h`), 'deny');
+  // Reading their file to copy it elsewhere is still a read.
+  assert.equal(bash(`cp ${A}/agent-b/memory.md /tmp/theirs.md`), 'allow');
+  assert.equal(bash(`tar -czf /tmp/b.tgz ${A}/agent-b`), 'allow');
+  // And moving my OWN file wherever I like is mine to do.
+  assert.equal(bash(`mv ${A}/agent-a/memory.md /tmp/mine.md`), 'allow');
+});
+
 // --- 18. G3/G4: wrapper value flags, and the ledger's redaction --------------
 
 test('18. every wrapper resolves past a flag VALUE, not just past the flag', () => {
