@@ -251,6 +251,19 @@ test('F6. an archiver reads its sources and writes only the archive', () => {
   assert.deepEqual(writes('gzip /o/f'), ['/o/f'], 'gzip does replace its operand');
 });
 
+test('E. $(echo WORD) is the one substitution resolvable without running it', () => {
+  assert.deepEqual(texts('$(echo mempalace) sync'), ['mempalace sync']);
+  assert.deepEqual(texts('eval $(echo "mempalace sync")'), ['mempalace sync']);
+  assert.deepEqual(texts('`echo mempalace` repair'), ['mempalace repair']);
+  assert.deepEqual(texts('$(echo git) push'), ['git push']);
+  // Anything whose output we cannot see stays unresolved, and still runs as its own
+  // command — this is a documented miss, not a guess.
+  assert.deepEqual(texts('$(echo -n mempalace) sync').includes('mempalace sync'), false,
+    'echo -n changes the output, so it is not resolved');
+  assert.ok(texts('$(cat which) sync').includes('cat which'),
+    'an unresolvable substitution is still a command in its own right');
+});
+
 // --- 3. honesty and robustness ------------------------------------------------
 
 test('3. an xargs operand we cannot read is reported as unresolved, not invented', () => {

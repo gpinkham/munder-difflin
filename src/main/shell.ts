@@ -147,6 +147,34 @@ const INLINE_WRITE_CALLS: Array<{ re: RegExp; arg: 1 | 2; needsWriteMode?: boole
   { re: /^(?:.*\.)?open$/, arg: 1, needsWriteMode: true },
 ];
 
+/**
+ * `$(echo WORD)` and `` `echo WORD` `` resolved textually, before tokenising.
+ *
+ * The output of a substitution is normally unknowable without running it, and this
+ * parser never runs anything — which is why `$(cat which_agent)` is on the residual
+ * list and stays there. `echo` with literal arguments is the one exception: its
+ * output is provably its arguments, so `$(echo mempalace) sync` IS `mempalace sync`.
+ * Narrow on purpose: no flags (`echo -n` changes the output), and nothing containing
+ * `$`, a backtick or a paren, so nothing is resolved that we cannot see all of.
+ * Other substitutions are untouched and still recursed into as commands.
+ */
+function resolveEcho(src: string): string {
+  let out = src;
+  for (let pass = 0; pass < 3; pass++) {
+    const next = out
+      .replace(/\$\(\s*echo\s+([^()$`]*?)\s*\)/g, (m, args) => (args.startsWith('-') ? m : args))
+      .replace(/`\s*echo\s+([^`$()]*?)\s*`/g, (m, args) => (args.startsWith('-') ? m : args));
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+/** Tokenise, with the one substitution we can resolve without running it. */
+function prepare(src: string): Tok[] {
+  return tokenise(resolveEcho(src));
+}
+
 type Tok = { t: 'word'; v: string; q: boolean; subs: string[] } | { t: 'op'; v: string };
 
 /**
@@ -357,7 +385,7 @@ export function realAbsolute(p: string, cwd: string): string {
 export function effectiveCommands(command: string, cwd = process.cwd()): EffectiveCommand[] {
   const ctx: Ctx = { env: new Map(), cwd, depth: 0, out: [] };
   try {
-    walk(tokenise(command), ctx);
+    walk(prepare(command), ctx);
   } catch {
     // Total by contract: a parser bug must not reach a rule with on_error: deny.
   }
@@ -425,7 +453,7 @@ function simple(toks: Tok[], ctx: Ctx): void {
   }
 
   // `$(…)` and backticks run their own commands, whatever the outer one does.
-  for (const s of subs) walk(tokenise(s), { ...ctx, depth: ctx.depth + 1 });
+  for (const s of subs) walk(prepare(s), { ...ctx, depth: ctx.depth + 1 });
 
   if (!argv.length) {
     if (redirects.length) record(ctx, [], redirects, []);
@@ -476,7 +504,7 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
     return;
   }
   if (basename(head) === 'eval') {
-    walk(tokenise(argv.slice(1).join(' ')), deeper);
+    walk(prepare(argv.slice(1).join(' ')), deeper);
     return;
   }
   if (basename(head) === 'xargs') {
@@ -502,7 +530,7 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
   const base = basename(head);
   if (SHELL_DASH_C.has(base)) {
     const ci = argv.findIndex((a, k) => k > 0 && (a === '-c' || a === '-lc' || a === '-cl'));
-    if (ci !== -1 && argv[ci + 1] !== undefined) { walk(tokenise(argv[ci + 1]), deeper); return; }
+    if (ci !== -1 && argv[ci + 1] !== undefined) { walk(prepare(argv[ci + 1]), deeper); return; }
   }
   if ((base === 'python' || base === 'python3' || base === 'python2') && argv[1] === '-m' && argv[2]) {
     // `python3 -m mempalace sync` IS `mempalace sync`.
@@ -515,7 +543,7 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
       const script = argv[fi + 1];
       record(ctx, [base, ...argv.slice(1)], [...redirects, ...inlineTargets(script)], []);
       // A string the script hands to a shell is a command, so parse it as one.
-      for (const m of script.matchAll(EXEC_API)) walk(tokenise(m[2]), deeper);
+      for (const m of script.matchAll(EXEC_API)) walk(prepare(m[2]), deeper);
       return;
     }
   }
