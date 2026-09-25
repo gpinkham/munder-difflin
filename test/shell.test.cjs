@@ -164,6 +164,22 @@ test('2i. a symlinked parent resolves to the real path, for a file that does not
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+test('2j. an unpacker writes into its -C directory, but only when extracting', () => {
+  assert.deepEqual(writes('tar -xzf a.tgz -C /b/dir'), ['/b/dir/']);
+  assert.deepEqual(writes('tar --extract --file a.tgz --directory /b/dir'), ['/b/dir/']);
+  assert.deepEqual(writes('unzip a.zip -d /b/dir'), ['/b/dir/']);
+  assert.deepEqual(writes('tar -czf a.tgz -C /b/dir .'), [], 'creating an archive writes the archive, not the dir');
+});
+
+test('2k. a string an inline script hands to a shell is a command; one it prints is not', () => {
+  assert.ok(texts(`python3 -c "import os; os.system('git push')"`).includes('git push'));
+  assert.ok(texts(`node -e "require('child_process').execSync('mempalace sync')"`).includes('mempalace sync'));
+  assert.deepEqual(
+    texts(`node -e "console.log('git push after approval')"`).filter((t) => t.startsWith('git')),
+    [], 'a logged sentence must not read as an invocation');
+  assert.ok(writes(`python3 -c "os.system('echo x > /a/out.md')"`).includes('/a/out.md'));
+});
+
 // --- 3. honesty and robustness ------------------------------------------------
 
 test('3. an xargs operand we cannot read is reported as unresolved, not invented', () => {

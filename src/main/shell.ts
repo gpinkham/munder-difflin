@@ -58,7 +58,14 @@ const TRANSPARENT = new Set([
 const KEYWORDS = new Set(['do', 'done', 'then', 'else', 'elif', 'fi', 'esac', 'in', '!', '{', '}']);
 
 /** `cp a b` — the LAST operand is the destination, every earlier one is a source. */
-const LAST_ARG_DEST = new Set(['cp', 'mv', 'rsync', 'ln', 'install', 'scp', 'rclone']);
+const LAST_ARG_DEST = new Set(['cp', 'mv', 'rsync', 'ln', 'install', 'scp', 'rclone', 'ditto']);
+
+/** Unpackers whose destination is a `-C`/`-d` directory rather than an operand. */
+const DEST_FLAG: Record<string, { flags: string[]; needsExtract: boolean }> = {
+  tar: { flags: ['-C', '--directory'], needsExtract: true },
+  bsdtar: { flags: ['-C', '--directory'], needsExtract: true },
+  unzip: { flags: ['-d'], needsExtract: false },
+};
 
 /** Every operand is a target: these verbs only ever mutate what they are given. */
 const ALL_ARGS_TARGET = new Set([
@@ -73,6 +80,11 @@ const INLINE_SCRIPT: Record<string, string[]> = {
   python: ['-c'], python2: ['-c'], python3: ['-c'],
   perl: ['-e', '-E'], ruby: ['-e'], php: ['-r'], deno: ['eval'], bun: ['-e'],
 };
+
+/** Ways an inline script hands a string back to a shell. The string is parsed as a
+ *  command; a string that is merely PRINTED is not, because a line of prose in a
+ *  log call reads as a command and would deny the work that logs it. */
+const EXEC_API = /(?:os\.system|subprocess\.(?:run|call|check_output|Popen)|execSync|spawnSync|exec|execFile|spawn|system|backticks)\s*\(\s*(?:\[\s*)?(['"])((?:(?!\1).)*)\1/g;
 
 /** A write in an inline script. Paired with a path literal from the same script. */
 const INLINE_WRITE = /(writeFile|appendFile|createWriteStream|copyFile|rename|mkdir|rmdir|unlink|rmSync|rm\(|truncate|open\s*\([^)]*['"][wax]|\.write\(|shutil\.(copy|move)|os\.remove|os\.rename|>\s*open)/;
@@ -429,6 +441,8 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
     if (fi !== -1 && argv[fi + 1] !== undefined) {
       const script = argv[fi + 1];
       record(ctx, [base, ...argv.slice(1)], [...redirects, ...inlineTargets(script)], []);
+      // A string the script hands to a shell is a command, so parse it as one.
+      for (const m of script.matchAll(EXEC_API)) walk(tokenise(m[2]), deeper);
       return;
     }
   }
@@ -463,6 +477,18 @@ function verbTargets(base: string, argv: string[]): string[] {
     return suppliedScript ? real : real.slice(1);
   }
   if (base === 'dd') return argv.filter((a) => a.startsWith('of=')).map((a) => a.slice(3));
+  const dest = DEST_FLAG[base];
+  if (dest) {
+    if (dest.needsExtract && !argv.some((a) => /^-[^-]*x/.test(a) || a === '--extract')) return [];
+    // `tar -xzf a.tgz -C dir` writes into dir; the same flag on a `-c` writes the
+    // archive instead, so tar has to say it is extracting. unzip only extracts.
+    for (let i = 1; i < argv.length; i++) {
+      if (!dest.flags.includes(argv[i])) continue;
+      const dir = argv[i + 1];
+      if (dir) return [/[/\\]$/.test(dir) ? dir : dir + '/'];
+    }
+    return [];
+  }
   if (ALL_ARGS_TARGET.has(base)) return SKIP_FIRST_OPERAND.has(base) ? operands.slice(1) : operands;
   if (LAST_ARG_DEST.has(base)) return operands.length >= 2 ? [operands[operands.length - 1]] : [];
   return [];
