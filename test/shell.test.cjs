@@ -1,0 +1,190 @@
+'use strict';
+
+// The Bash normaliser. Every case here is a disguise that md-188 measured the raw-string
+// matcher missing, or a MENTION it must keep missing. Read alongside test/policy.test.cjs,
+// which asserts the same thing through the rules.
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const loadTs = require('./load-ts.cjs');
+
+const { effectiveCommands, realAbsolute } = loadTs('src/main/shell.ts');
+
+/** Every command the call runs, as normalised text. */
+const texts = (cmd, cwd) => effectiveCommands(cmd, cwd ?? '/work').map((c) => c.text);
+/** Every path the call writes. */
+const writes = (cmd, cwd) => effectiveCommands(cmd, cwd ?? '/work').flatMap((c) => c.writes);
+
+// --- 1. the disguises ---------------------------------------------------------
+
+test('1. a wrapper, a prefix or an absolute program path collapses onto the plain command', () => {
+  for (const cmd of [
+    'mempalace sync',
+    'sudo mempalace sync',
+    'nohup mempalace sync &',
+    'env FOO=1 mempalace sync',
+    'time mempalace sync',
+    'timeout 30 mempalace sync',
+    '/usr/local/bin/mempalace sync',
+    'bash -c "mempalace sync"',
+    "sh -c 'mempalace sync'",
+    'eval "mempalace sync"',
+    '(mempalace sync)',
+    '{ mempalace sync; }',
+    'python3 -m mempalace sync',
+    'M=mempalace; $M sync',
+    'S=sync; mempalace $S',
+    'for c in sync; do mempalace $c; done',
+    'xargs -I{} mempalace {} <<< sync',
+    'ls\nmempalace sync',
+    'echo go && mempalace sync',
+    'false || mempalace sync',
+    'cd /tmp; mempalace sync',
+  ]) {
+    assert.ok(texts(cmd).includes('mempalace sync'), cmd);
+  }
+});
+
+test('1b. a MENTION stays one word and never becomes a command', () => {
+  for (const cmd of [
+    'echo "never run mempalace sync"',
+    "grep -n 'mempalace sync' PROTOCOL.md",
+    'echo git push',
+    "git commit -m 'prepare push'",
+    "cat <<'EOF'\nmempalace sync\ngit push\nEOF",
+    'cat <<-END\n\tmempalace sync\n\tEND',
+  ]) {
+    const t = texts(cmd);
+    assert.equal(t.includes('mempalace sync'), false, cmd);
+    assert.equal(t.includes('git push'), false, cmd);
+  }
+});
+
+test('1c. a heredoc body is data, and the command after it still parses', () => {
+  const t = texts("cat <<'EOF' > /tmp/x\nmempalace sync\nEOF\ngit push");
+  assert.equal(t.includes('mempalace sync'), false, 'the body is not a command');
+  assert.ok(t.includes('git push'), 'the line after the delimiter is');
+});
+
+test('1d. an unset variable is left as written rather than collapsing to nothing', () => {
+  assert.deepEqual(texts('mempalace $UNSET'), ['mempalace $UNSET']);
+  assert.deepEqual(writes('rm -rf $UNSET/x'), ['/work/$UNSET/x']);
+});
+
+test('1e. a command substitution runs its own commands', () => {
+  assert.ok(texts('echo "$(mempalace sync)"').includes('mempalace sync'));
+  assert.ok(texts('echo `git push`').includes('git push'));
+});
+
+test('1f. git keeps its flags so a rule can still require push in subcommand position', () => {
+  assert.deepEqual(texts('git -C ~/dev/x push'), [`git -C ${os.homedir()}/dev/x push`]);
+  assert.deepEqual(texts('git log --grep push'), ['git log --grep push']);
+  assert.deepEqual(texts('git stash push -m wip'), ['git stash push -m wip']);
+});
+
+// --- 2. write targets ---------------------------------------------------------
+
+test('2. a redirection is a write, a read redirection is not', () => {
+  assert.deepEqual(writes('cat a > /x/out.md'), ['/x/out.md']);
+  assert.deepEqual(writes('cat a >> /x/out.md'), ['/x/out.md']);
+  assert.deepEqual(writes('sort < /x/in.md'), []);
+  assert.deepEqual(writes('wc -l /x/in.md'), []);
+  assert.deepEqual(writes('npm run build 2> /x/err.log'), ['/x/err.log']);
+  assert.deepEqual(writes('npm run build &> /x/all.log'), ['/x/all.log']);
+});
+
+test('2b. cp/mv/rsync/ln/install write their LAST operand only', () => {
+  assert.deepEqual(writes('cp /a/src.md /b/dest.md'), ['/b/dest.md']);
+  assert.deepEqual(writes('mv -f /a/one /a/two /b/dir/'), ['/b/dir/']);
+  assert.deepEqual(writes('rsync -a /a/ /b/'), ['/b/']);
+  assert.deepEqual(writes('ln -s /a/real /b/link'), ['/b/link']);
+  assert.deepEqual(writes('install -m 600 /a/f /b/f'), ['/b/f']);
+  assert.deepEqual(writes('cp /a/only'), [], 'one operand is not a destination');
+});
+
+test('2c. a directory destination keeps its trailing slash, so "inside here" still globs', () => {
+  assert.deepEqual(writes('rsync -a ./out/ /b/dir/'), ['/b/dir/']);
+  assert.deepEqual(writes('cp x /b/dir'), ['/b/dir'], 'no trailing slash written, none invented');
+});
+
+test('2d. verbs that only mutate write every operand; reads write nothing', () => {
+  assert.deepEqual(writes('rm -rf /a/x /a/y'), ['/a/x', '/a/y']);
+  assert.deepEqual(writes('touch /a/x'), ['/a/x']);
+  assert.deepEqual(writes('tee /a/x /a/y'), ['/a/x', '/a/y']);
+  assert.deepEqual(writes('chmod 600 /a/x'), ['/a/x'], 'the mode is not a path');
+  assert.deepEqual(writes('chown me:staff /a/x'), ['/a/x']);
+  assert.deepEqual(writes('dd if=/a/in of=/a/out'), ['/a/out']);
+  for (const cmd of ['cat /a/x', 'ls /a', 'grep -n TODO /a/x', 'head -5 /a/x', 'diff /a/x /a/y']) {
+    assert.deepEqual(writes(cmd), [], cmd);
+  }
+});
+
+test('2e. sed writes only in place, and the script is not mistaken for a file', () => {
+  assert.deepEqual(writes("sed -i '' s/a/b/ /a/x"), ['/a/x'], 'BSD sed -i takes an empty suffix');
+  assert.deepEqual(writes('sed -i s/a/b/ /a/x'), ['/a/x'], 'GNU sed -i does not');
+  assert.deepEqual(writes('sed -i -e s/a/b/ /a/x'), ['/a/x'], '-e supplies the script');
+  assert.deepEqual(writes("sed -n '1,5p' /a/x"), [], 'sed -n reads');
+});
+
+test('2f. an inline script is searched for paths only when it also writes', () => {
+  assert.deepEqual(writes(`node -e "require('fs').writeFileSync('/a/x','y')"`), ['/a/x']);
+  assert.deepEqual(writes(`python3 -c "open('/a/x','w').write('y')"`), ['/a/x']);
+  assert.deepEqual(writes(`node -e "console.log(require('fs').readFileSync('/a/x','utf8'))"`), [],
+    'a read is not a write');
+  assert.deepEqual(writes(`python3 -c "print('/a/x')"`), []);
+});
+
+test('2g. paths are resolved: relative to cwd, through .., ~ and $HOME', () => {
+  assert.deepEqual(writes('touch out.md', '/work/sub'), ['/work/sub/out.md']);
+  assert.deepEqual(writes('touch ../out.md', '/work/sub'), ['/work/out.md']);
+  assert.deepEqual(writes('touch a/../b/out.md', '/work'), ['/work/b/out.md']);
+  assert.deepEqual(writes('touch ~/out.md'), [`${os.homedir()}/out.md`]);
+  assert.deepEqual(writes('H=/h; touch $H/out.md'), ['/h/out.md']);
+  assert.deepEqual(writes('touch $HOME/out.md'), [`${os.homedir()}/out.md`]);
+  assert.deepEqual(writes('touch $AGENT_DIR/out.md'), ['/work/$AGENT_DIR/out.md'],
+    'an agent-shell variable is not in the daemon environment, so it is left alone rather than guessed');
+});
+
+test('2h. cd moves the cwd for the commands that follow it, but not out of a subshell', () => {
+  assert.deepEqual(writes('cd /elsewhere && touch out.md', '/work'), ['/elsewhere/out.md']);
+  assert.deepEqual(writes('(cd /elsewhere; touch a.md); touch b.md', '/work'),
+    ['/elsewhere/a.md', '/work/b.md']);
+});
+
+test('2i. a symlinked parent resolves to the real path, for a file that does not exist yet', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'md199-shell-'));
+  const real = fs.realpathSync(root);
+  fs.mkdirSync(path.join(real, 'target'));
+  fs.symlinkSync(path.join(real, 'target'), path.join(real, 'link'));
+  assert.deepEqual(writes(`touch ${real}/link/new.md`), [`${real}/target/new.md`]);
+  assert.equal(realAbsolute(`${real}/link/`, '/work'), `${real}/target/`, 'and keeps the trailing slash');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+// --- 3. honesty and robustness ------------------------------------------------
+
+test('3. an xargs operand we cannot read is reported as unresolved, not invented', () => {
+  const [c] = effectiveCommands('cat plan.txt | xargs -I{} mempalace {}', '/work');
+  assert.deepEqual(effectiveCommands('cat plan.txt | xargs -I{} mempalace {}', '/work').at(-1).unresolved, ['{}']);
+  assert.ok(c, 'the pipeline still parses');
+});
+
+test('3b. malformed input never throws and always yields a subject to match', () => {
+  for (const cmd of ['', '   ', '"unterminated', "echo 'unclosed", '$(', '`', '>>>', 'cat <<EOF', 'a|||b', '((((']) {
+    const r = effectiveCommands(cmd, '/work');
+    assert.ok(Array.isArray(r), JSON.stringify(cmd));
+  }
+});
+
+test('3c. a pathological command is bounded, not unbounded', () => {
+  const r = effectiveCommands('true; '.repeat(5000), '/work');
+  assert.ok(r.length <= 200, `${r.length} commands`);
+});
+
+test('3d. rejoining argv cannot invent a command boundary that was not there', () => {
+  assert.deepEqual(texts("grep -n 'a; mempalace sync' f"), ["grep -n 'a; mempalace sync' f"]);
+  assert.deepEqual(texts('echo "two  spaces"'), ["echo 'two  spaces'"]);
+});
