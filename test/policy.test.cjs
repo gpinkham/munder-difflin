@@ -577,6 +577,64 @@ test('12m. an old-style pattern written against the raw string keeps working', (
   assert.equal(e.evaluate(pre('Bash', { command: 'echo git push' })).decision, 'allow');
 });
 
+// --- 13. Dwight's review of md-199, through the rules -----------------------
+
+test('13. a wrapper flag value no longer hides the command from any of the three rules', () => {
+  const e = shipped();
+  assert.equal(e.evaluate(pre('Bash', { command: 'sudo -u gpinkham mempalace sync' })).decision, 'deny');
+  assert.equal(e.evaluate(pre('Bash', { command: 'nice -n 5 mempalace repair' })).decision, 'deny');
+  assert.equal(e.evaluate(pre('Bash', { command: 'nice -n 10 git push' })).decision, 'ask');
+  assert.equal(e.evaluate(pre('Bash', {
+    command: 'sudo -u gpinkham cp ./a.md /x/hive/agents/agent-b/inbox/x.json'
+  }, 'agent-a')).decision, 'deny');
+});
+
+test('13b. the dry-run exemption needs a whole word, not the text somewhere', () => {
+  const e = shipped();
+  for (const command of [
+    'git push -o "ci.message=--dry-run" origin main',
+    'git push origin main --push-option=--dry-run',
+    'git push # --dry-run'
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command })).decision, 'ask', command);
+  }
+  for (const command of ['git push --dry-run', 'git push origin main --dry-run', 'npm publish --dry-run']) {
+    assert.equal(e.evaluate(pre('Bash', { command })).decision, 'allow', command);
+  }
+});
+
+test('13c. reading another agent through an inline script is not a write to it', () => {
+  const e = shipped();
+  const other = '/x/hive/agents/agent-b';
+  for (const command of [
+    `node -e "process.stdout.write(require('fs').readFileSync('${other}/memory.md','utf8'))"`,
+    `python3 -c "import sys; sys.stdout.write(open('${other}/memory.md').read())"`,
+    `node -e "require('fs').writeFileSync('/tmp/copy.md', require('fs').readFileSync('${other}/memory.md'))"`,
+    `zip -r /tmp/backup.zip ${other}/results`,
+    `node -e "const r=/a/.exec('mempalace sync')"`
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command }, 'agent-a')).decision, 'allow', command);
+  }
+});
+
+test('13d. -t and install -d are cross-agent writes; -t into your own folder is not', () => {
+  const e = shipped();
+  const mine = '/x/hive/agents/agent-a';
+  const other = '/x/hive/agents/agent-b';
+  for (const command of [
+    `cp -t ${other}/results ${mine}/a.md`,
+    `mv -t ${other}/inbox ${mine}/msg.json`,
+    `cp --target-directory=${other}/results ${mine}/a.md`,
+    `install -d ${other}/newdir`,
+    `sed --in-place s/a/b/ ${other}/memory.md`
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command }, 'agent-a')).decision, 'deny', command);
+  }
+  assert.equal(e.evaluate(pre('Bash', {
+    command: `cp -t ${mine}/results ${other}/a.md ${other}/b.md`
+  }, 'agent-a')).decision, 'allow', 'copying INTO my own folder is the ordinary case');
+});
+
 // --- the glob engine -------------------------------------------------------
 
 test('globToRegExp: * stops at a separator, ** crosses it', () => {

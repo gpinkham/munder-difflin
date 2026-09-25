@@ -48,11 +48,34 @@ export interface EffectiveCommand {
 const MAX_DEPTH = 6;
 const MAX_COMMANDS = 200;
 
-/** Prefixes that wrap another command without changing which command it is. */
-const TRANSPARENT = new Set([
-  'sudo', 'doas', 'nohup', 'command', 'exec', 'time', 'nice', 'ionice',
-  'stdbuf', 'setsid', 'caffeinate', 'script',
-]);
+/**
+ * Prefixes that wrap another command without changing which command it is, and the
+ * flags of each that swallow the next word.
+ *
+ * The value table is the whole point: skipping flags but not their arguments buries
+ * the real command one word deeper, so `sudo -u gpinkham mempalace sync` parses as
+ * `gpinkham mempalace sync` — a command name no rule describes, with no write
+ * targets. `sudo -u` is the ordinary spelling of sudo, so that is not an edge case:
+ * it defeated all three rules at once, and `cp` buried that way contributed nothing
+ * for path_glob to judge.
+ *
+ * `firstOperandIsFile` is for `script`, whose typescript file sits between the flags
+ * and the command it records.
+ */
+const TRANSPARENT: Record<string, { values: Set<string>; firstOperandIsFile?: boolean }> = {
+  sudo: { values: new Set(['-u', '-g', '-U', '-p', '-C', '-h', '-r', '-t', '-T', '--user', '--group', '--prompt', '--close-from', '--host', '--role', '--type']) },
+  doas: { values: new Set(['-a', '-C', '-u']) },
+  nohup: { values: new Set() },
+  command: { values: new Set() },
+  exec: { values: new Set(['-a']) },
+  time: { values: new Set(['-o', '-f', '--output', '--format']) },
+  nice: { values: new Set(['-n', '--adjustment']) },
+  ionice: { values: new Set(['-c', '-n', '-p', '-P', '--class', '--classdata', '--pid']) },
+  stdbuf: { values: new Set(['-i', '-o', '-e', '--input', '--output', '--error']) },
+  setsid: { values: new Set() },
+  caffeinate: { values: new Set(['-t', '-w']) },
+  script: { values: new Set(['-F', '-t', '-T', '--command', '--logfile']), firstOperandIsFile: true },
+};
 
 /** Shell keywords that may lead a segment once `;`/newline splitting is done. */
 const KEYWORDS = new Set(['do', 'done', 'then', 'else', 'elif', 'fi', 'esac', 'in', '!', '{', '}']);
@@ -70,8 +93,25 @@ const DEST_FLAG: Record<string, { flags: string[]; needsExtract: boolean }> = {
 /** Every operand is a target: these verbs only ever mutate what they are given. */
 const ALL_ARGS_TARGET = new Set([
   'rm', 'rmdir', 'unlink', 'touch', 'mkdir', 'truncate', 'shred',
-  'chmod', 'chown', 'chgrp', 'tee', 'gzip', 'gunzip', 'zip',
+  'chmod', 'chown', 'chgrp', 'tee', 'gzip', 'gunzip',
 ]);
+
+/** Archivers whose FIRST operand is the archive and the rest are sources being read.
+ *  `zip` sat in ALL_ARGS_TARGET, so `zip -r /tmp/backup.zip <other>/results` counted
+ *  a read-only archive of someone else's folder as a write to it. */
+const ARCHIVE_FIRST_ARG = new Set(['zip', 'jar']);
+
+/**
+ * `-t DIR` / `--target-directory=DIR` inverts the coreutils copiers: the destination
+ * comes first, as a flag value, and EVERY operand is a source. Both readings were
+ * wrong — `cp -t <other>/results mine.md` was allowed, and `cp -t mine/ <other>/a.md
+ * <other>/b.md` was DENIED because the last source was read as the destination.
+ *
+ * Only the coreutils verbs: rsync's `-t` means "preserve times", so reading it as a
+ * destination would invent a target out of a source.
+ */
+const TARGET_DIR_VERBS = new Set(['cp', 'mv', 'ln', 'install']);
+const TARGET_DIR_FLAGS = ['-t', '--target-directory'];
 
 /** Interpreters that take a program on the command line instead of a file. */
 const SHELL_DASH_C = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish']);
@@ -81,13 +121,31 @@ const INLINE_SCRIPT: Record<string, string[]> = {
   perl: ['-e', '-E'], ruby: ['-e'], php: ['-r'], deno: ['eval'], bun: ['-e'],
 };
 
-/** Ways an inline script hands a string back to a shell. The string is parsed as a
- *  command; a string that is merely PRINTED is not, because a line of prose in a
- *  log call reads as a command and would deny the work that logs it. */
-const EXEC_API = /(?:os\.system|subprocess\.(?:run|call|check_output|Popen)|execSync|spawnSync|exec|execFile|spawn|system|backticks)\s*\(\s*(?:\[\s*)?(['"])((?:(?!\1).)*)\1/g;
+/**
+ * Ways an inline script hands a string back to a shell, so the string is parsed as a
+ * command. Every name here is unambiguous ON PURPOSE. A bare `exec` also names
+ * `RegExp.prototype.exec`, so `/a/.exec('mempalace sync')` was read as an invocation
+ * and denied; a bare `spawn` or `system` has the same problem. The cost of naming
+ * only the unmistakable ones is a miss, which is the direction to err.
+ */
+const EXEC_API = /(?:os\.system|os\.popen|subprocess\.(?:run|call|check_call|check_output|Popen)|child_process\.(?:exec|execFile|spawn)|execSync|execFileSync|spawnSync)\s*\(\s*(?:\[\s*)?(['"])((?:(?!\1).)*)\1/g;
 
-/** A write in an inline script. Paired with a path literal from the same script. */
-const INLINE_WRITE = /(writeFile|appendFile|createWriteStream|copyFile|rename|mkdir|rmdir|unlink|rmSync|rm\(|truncate|open\s*\([^)]*['"][wax]|\.write\(|shutil\.(copy|move)|os\.remove|os\.rename|>\s*open)/;
+/**
+ * Write calls in an inline script, and WHICH argument each one targets.
+ *
+ * Harvesting every path literal in a script that wrote anywhere was wrong in both
+ * directions: `writeFileSync(mine, readFileSync(theirs))` counted the file being READ
+ * as a write, and `stdout.write(readFileSync(theirs))` counted a print as a write at
+ * all — a read of another agent's folder denied by a rule whose own reason says
+ * reading it is fine. So the target is taken from the call that names it: argument 1
+ * for a call that writes its first argument, argument 2 for a copy or a rename.
+ */
+const INLINE_WRITE_CALLS: Array<{ re: RegExp; arg: 1 | 2; needsWriteMode?: boolean }> = [
+  { re: /^(?:.*\.)?(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|truncateSync|truncate|unlinkSync|unlink|rmSync|rmdirSync|mkdirSync|mkdir|makedirs|remove)$/, arg: 1 },
+  { re: /^(?:.*\.)?(?:copyFileSync|copyFile|copyfile|renameSync|rename|replace|cpSync|linkSync|symlinkSync|copy|copy2|move)$/, arg: 2 },
+  // `open(path, 'w')` writes; `open(path)` and `open(path, 'r')` read.
+  { re: /^(?:.*\.)?open$/, arg: 1, needsWriteMode: true },
+];
 
 type Tok = { t: 'word'; v: string; q: boolean; subs: string[] } | { t: 'op'; v: string };
 
@@ -158,6 +216,14 @@ function tokenise(src: string): Tok[] {
     if (c === '$' && src[i + 1] === '(') { started = true; const [body, next] = readBalanced(src, i + 2, '(', ')'); subs.push(body); i = next; continue; }
     if (c === '`') { started = true; const end = src.indexOf('`', i + 1); subs.push(src.slice(i + 1, end === -1 ? src.length : end)); i = end === -1 ? src.length : end + 1; continue; }
 
+    // A comment at word start runs to the end of the line. Left in, its words land in
+    // the preceding command's argv, which is both wrong and a way to feed tokens into
+    // whatever string a rule matches.
+    if (c === '#' && !started) {
+      const nl = src.indexOf('\n', i);
+      i = nl === -1 ? src.length : nl; // stop AT the newline: it is still a separator
+      continue;
+    }
     if (c === ' ' || c === '\t' || c === '\r') { flush(); i++; continue; }
     if (c === '\n') { op('\n'); i++; continue; }
     if (c === ';') { op(src[i + 1] === ';' ? ';;' : ';'); i += src[i + 1] === ';' ? 2 : 1; continue; }
@@ -390,9 +456,16 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
     if (i < argv.length) return dispatch(argv.slice(i), redirects, herestring, ctx);
     return;
   }
-  if (TRANSPARENT.has(basename(head))) {
+  const wrapper = TRANSPARENT[basename(head)];
+  if (wrapper) {
     let i = 1;
-    while (i < argv.length && argv[i].startsWith('-')) i++;
+    while (i < argv.length && argv[i].startsWith('-') && argv[i] !== '-' && !argv[i].includes('=')) {
+      if (wrapper.values.has(argv[i])) i++; // `-u gpinkham` — the user is not the command
+      i++;
+    }
+    while (i < argv.length && argv[i].startsWith('--') && argv[i].includes('=')) i++;
+    // `script /dev/null cmd …` records into that file; only what follows is a command.
+    if (wrapper.firstOperandIsFile && i + 1 < argv.length) i++;
     if (i < argv.length) return dispatch(argv.slice(i), redirects, herestring, ctx);
     return;
   }
@@ -468,12 +541,19 @@ function verbTargets(base: string, argv: string[]): string[] {
     }
     operands.push(a);
   }
+  if (TARGET_DIR_VERBS.has(base)) {
+    const dir = flagValue(argv, TARGET_DIR_FLAGS);
+    if (dir !== null) return [/[/\\]$/.test(dir) ? dir : dir + '/'];
+    // `install -d a b` creates directories; there is no source among the operands.
+    if (base === 'install' && flags.some((f) => /^-[a-zA-Z]*d$/.test(f) || f === '--directory')) return operands;
+  }
   if (base === 'sed') {
-    if (!flags.some((f) => /^-[a-zA-Z]*i/.test(f))) return [];
+    if (!flags.some((f) => /^-[a-zA-Z]*i/.test(f) || f === '--in-place' || f.startsWith('--in-place='))) return [];
     // BSD `sed -i '' script file` leaves an empty operand; the script is the first
     // real operand unless -e/-f already supplied it.
     const real = operands.filter((o) => o !== '');
-    const suppliedScript = flags.some((f) => f === '-e' || f === '-f' || f === '--expression' || f === '--file');
+    const suppliedScript = flags.some((f) => f === '-e' || f === '-f' || f === '--expression' || f === '--file'
+      || f.startsWith('--expression=') || f.startsWith('--file='));
     return suppliedScript ? real : real.slice(1);
   }
   if (base === 'dd') return argv.filter((a) => a.startsWith('of=')).map((a) => a.slice(3));
@@ -489,16 +569,41 @@ function verbTargets(base: string, argv: string[]): string[] {
     }
     return [];
   }
+  if (ARCHIVE_FIRST_ARG.has(base)) return operands.slice(0, 1);
   if (ALL_ARGS_TARGET.has(base)) return SKIP_FIRST_OPERAND.has(base) ? operands.slice(1) : operands;
   if (LAST_ARG_DEST.has(base)) return operands.length >= 2 ? [operands[operands.length - 1]] : [];
   return [];
 }
 
-/** Path-looking literals in an inline script, but only when the script also writes. */
+/** A flag's value, whether written `-t DIR`, `--target-directory DIR` or `=DIR`. */
+function flagValue(argv: string[], names: string[]): string | null {
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i];
+    for (const n of names) {
+      if (a === n) return argv[i + 1] ?? null;
+      if (a.startsWith(n + '=')) return a.slice(n.length + 1);
+    }
+  }
+  return null;
+}
+
+/** The path each write call in an inline script targets — not every path in it. */
 function inlineTargets(script: string): string[] {
-  if (!INLINE_WRITE.test(script)) return [];
   const out: string[] = [];
-  for (const m of script.matchAll(/['"]([^'"\n]*\/[^'"\n]*)['"]/g)) out.push(m[1]);
+  // NAME ( 'first' , 'second'  — enough to tell a target from a source without
+  // parsing the host language. A call whose argument is not a literal is skipped,
+  // which is a miss (see the residual list), not a guess.
+  const call = /([\w.$]+)\s*\(\s*(?:(['"])((?:(?!\2).)*)\2)?\s*(?:,\s*(['"])((?:(?!\4).)*)\4)?/g;
+  for (const m of script.matchAll(call)) {
+    const [, name, , first, , second] = m;
+    for (const spec of INLINE_WRITE_CALLS) {
+      if (!spec.re.test(name)) continue;
+      if (spec.needsWriteMode && !/^[wax]/.test(second ?? '')) continue;
+      const target = spec.arg === 1 ? first : second;
+      if (target) out.push(target);
+      break;
+    }
+  }
   return out;
 }
 

@@ -180,6 +180,77 @@ test('2k. a string an inline script hands to a shell is a command; one it prints
   assert.ok(writes(`python3 -c "os.system('echo x > /a/out.md')"`).includes('/a/out.md'));
 });
 
+// --- F1-F6: Dwight's review of md-199 ---------------------------------------
+
+test('F1. a wrapper flag VALUE is not the command it wraps', () => {
+  // Skipping flags but not their arguments buried the real command one word deeper,
+  // which defeated all three rules at once. `sudo -u` is the ordinary spelling.
+  assert.deepEqual(texts('sudo -u gpinkham mempalace sync'), ['mempalace sync']);
+  assert.deepEqual(texts('nice -n 5 mempalace repair'), ['mempalace repair']);
+  assert.deepEqual(texts('nice -n 10 git push'), ['git push']);
+  assert.deepEqual(texts('ionice -c 2 mempalace sync'), ['mempalace sync']);
+  assert.deepEqual(texts('script -q /dev/null mempalace sync'), ['mempalace sync']);
+  assert.deepEqual(texts('doas -u gpinkham git push'), ['git push']);
+  assert.deepEqual(texts('stdbuf -o L npm run dev'), ['npm run dev']);
+  assert.deepEqual(texts('sudo --user=gpinkham mempalace sync'), ['mempalace sync'],
+    'an attached value carries no extra word');
+  assert.deepEqual(texts('sudo -n true'), ['true'], 'a boolean flag takes no value');
+});
+
+test('F1b. a command buried behind a wrapper flag still contributes its write target', () => {
+  assert.deepEqual(writes('sudo -u gpinkham cp ./a.md /o/inbox/x.json'), ['/o/inbox/x.json']);
+  assert.deepEqual(writes('nice -n 10 mv ./a.md /o/results/a.md'), ['/o/results/a.md']);
+});
+
+test('F3. a # comment is discarded, and the newline after it still separates', () => {
+  assert.deepEqual(texts('git push # --dry-run'), ['git push']);
+  assert.deepEqual(texts('echo hi # mempalace sync'), ['echo hi']);
+  assert.deepEqual(texts('# nothing here\ngit push'), ['git push']);
+  assert.deepEqual(texts('ls foo#bar'), ['ls foo#bar'], 'a # inside a word is not a comment');
+  assert.deepEqual(texts("echo '# not a comment'"), ["echo '# not a comment'"]);
+});
+
+test('F4. printing a file is not writing it, and the file being READ is not a target', () => {
+  assert.deepEqual(writes(`node -e "process.stdout.write(require('fs').readFileSync('/o/memory.md','utf8'))"`), []);
+  assert.deepEqual(writes(`python3 -c "import sys; sys.stdout.write(open('/o/memory.md').read())"`), []);
+  assert.deepEqual(writes(`python3 -c "print(open('/o/memory.md').read())"`), []);
+  assert.deepEqual(writes(`node -e "require('fs').writeFileSync('/m/out', require('fs').readFileSync('/o/in'))"`),
+    ['/m/out'], 'the write names its target; the read is not one');
+  assert.deepEqual(writes(`python3 -c "import shutil; shutil.copy('/m/a','/o/b')"`), ['/o/b'],
+    'a copy targets its SECOND argument');
+});
+
+test('F4b. a regex .exec is not a shell exec', () => {
+  assert.deepEqual(texts(`node -e "const r=/a/.exec('mempalace sync')"`),
+    [`node -e 'const r=/a/.exec('\\''mempalace sync'\\'')'`]);
+  assert.ok(texts(`node -e "require('child_process').execSync('mempalace sync')"`).includes('mempalace sync'),
+    'an unmistakable exec API still is one');
+  assert.ok(texts(`python3 -c "import os; os.system('git push')"`).includes('git push'));
+});
+
+test('F5. -t / --target-directory inverts the coreutils copiers', () => {
+  assert.deepEqual(writes('cp -t /o/results /m/a.md'), ['/o/results/']);
+  assert.deepEqual(writes('mv -t /o/inbox /m/msg.json'), ['/o/inbox/']);
+  assert.deepEqual(writes('cp --target-directory=/o/results /m/a.md'), ['/o/results/']);
+  assert.deepEqual(writes('cp -t /m/results /o/a.md /o/b.md'), ['/m/results/'],
+    'and a source is not the destination');
+  assert.deepEqual(writes('rsync -a -t /m/src/ /o/dst/'), ['/o/dst/'],
+    "rsync's -t means preserve times, so it must not be read as a destination");
+});
+
+test('F5b. install -d creates directories; sed --in-place is still in place', () => {
+  assert.deepEqual(writes('install -d /o/newdir'), ['/o/newdir']);
+  assert.deepEqual(writes('install -m 600 /a/f /b/f'), ['/b/f'], 'the ordinary form is unchanged');
+  assert.deepEqual(writes('sed --in-place s/a/b/ /o/memory.md'), ['/o/memory.md']);
+  assert.deepEqual(writes('sed --in-place=.bak s/a/b/ /o/memory.md'), ['/o/memory.md']);
+  assert.deepEqual(writes('sed --in-place --expression=s/a/b/ /o/memory.md'), ['/o/memory.md']);
+});
+
+test('F6. an archiver reads its sources and writes only the archive', () => {
+  assert.deepEqual(writes('zip -r /tmp/backup.zip /o/results'), ['/private/tmp/backup.zip']);
+  assert.deepEqual(writes('gzip /o/f'), ['/o/f'], 'gzip does replace its operand');
+});
+
 // --- 3. honesty and robustness ------------------------------------------------
 
 test('3. an xargs operand we cannot read is reported as unresolved, not invented', () => {
