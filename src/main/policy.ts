@@ -124,6 +124,17 @@ export interface PolicyPayload {
   agent_id?: string | null;
   tool_name?: string;
   tool_input?: unknown;
+  /**
+   * The directory the AGENT's shell is in, from the hook payload.
+   *
+   * Load-bearing, not a nicety. Without it a relative path resolves against
+   * `process.cwd()` — the Electron main process — so `echo x > ../kelly/memory.md`,
+   * which is how an agent sitting in its own folder writes to a sibling, resolved to
+   * a path under the app's working directory and matched nothing. Only an explicit
+   * absolute `cd` in the same command rescued it. It can also misfire the other way,
+   * if the daemon's cwd ever sits inside some agent's folder.
+   */
+  cwd?: string;
 }
 
 export interface PolicyVerdict {
@@ -321,7 +332,7 @@ export class PolicyEngine {
     if (!this.policyDir) return false;
     const dir = normalisePath(this.policyDir);
     const under = (path: string) => {
-      const abs = normalisePath(path);
+      const abs = normalisePath(path, p.cwd);
       return abs === dir || abs.startsWith(dir + '/');
     };
     const tool = p.tool_name;
@@ -333,17 +344,19 @@ export class PolicyEngine {
       const cmd = typeof input.command === 'string' ? input.command : '';
       if (!cmd) return false;
       const commands = this.commands(p, ctx);
-      // 1. A real write target under the policy directory. The accurate test, and
-      //    since the wrapper fix it also catches `sudo -u x sed -i '' s/a/b/ <policy>`.
-      for (const c of commands) if (c.writes.some(under)) return true;
-      // 2. The string heuristic, per segment, and only for a segment whose target the
-      //    parser could not extract at all — `busybox sed -i s/a/b/ <policy>/x` is a
-      //    verb it does not table. When a target WAS read and it is somewhere else,
-      //    trust that: `cp <policy>/authority.json /tmp/mine.json` copies the rules OUT,
-      //    which is a read, and guessing over a target we actually resolved is how a
-      //    heuristic starts denying the work it is meant to protect.
+      // 1. A resolved path the command mutates: written INTO, or taken away. `mv
+      //    <policy>/authority.json /tmp/` disables every rule on the floor in one
+      //    command, so a source a verb removes counts as a mutation of where it was.
+      for (const c of commands) if (c.writes.some(under) || c.removes.some(under)) return true;
+      // 2. The string heuristic, per segment, for a segment whose VERB resolved no
+      //    target — `busybox sed -i s/a/b/ <policy>/x` is a verb the parser does not
+      //    table. Gated on verbWrites, not writes: a bare `> /dev/null` resolves a path
+      //    without the parser having understood the verb, and treating the two the same
+      //    made "append a harmless redirect" a way past this test. When the VERB's own
+      //    target was read and it is elsewhere, trust it — `cp <policy>/authority.json
+      //    /tmp/mine.json` copies the rules out, which is a read.
       for (const c of commands) {
-        if (c.writes.length) continue;
+        if (c.verbWrites.length) continue;
         if (c.text.includes(this.policyDir) && POLICY_WRITE_SHAPE.test(c.text)) return true;
       }
       // 3. Only when the parser says it could not read this command do we fall back to
@@ -383,7 +396,7 @@ export class PolicyEngine {
     if (ctx.commands) return ctx.commands;
     const input = (p.tool_input ?? {}) as Record<string, unknown>;
     const cmd = typeof input.command === 'string' ? input.command : '';
-    ctx.commands = cmd ? effectiveCommands(cmd) : [];
+    ctx.commands = cmd ? effectiveCommands(cmd, p.cwd) : [];
     return ctx.commands;
   }
 
@@ -504,7 +517,7 @@ export class PolicyEngine {
     }
 
     if (m.path_glob !== undefined || m.path_not_glob !== undefined) {
-      const paths = this.paths(p, ctx).map((x) => normalisePath(x));
+      const paths = this.paths(p, ctx).map((x) => normalisePath(x, p.cwd));
       if (!paths.length) return null;
 
       // Judged PER PATH, not per payload. With one path field the two are the

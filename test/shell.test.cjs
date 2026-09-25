@@ -264,6 +264,81 @@ test('E. $(echo WORD) is the one substitution resolvable without running it', ()
     'an unresolvable substitution is still a command in its own right');
 });
 
+// --- F7-G: Dwight's final review ---------------------------------------------
+
+test('G1. a redirection is not the parser understanding the verb', () => {
+  // `> /dev/null` used to give a segment a resolved target, which was enough to skip
+  // the caller's string heuristic. verbWrites keeps the two apart.
+  const one = (cmd) => effectiveCommands(cmd, '/work')[0];
+  assert.deepEqual(one('busybox sed -i s/a/b/ /p/f > /dev/null').writes, ['/dev/null']);
+  assert.deepEqual(one('busybox sed -i s/a/b/ /p/f > /dev/null').verbWrites, [],
+    'busybox is not tabled, so the verb resolved nothing');
+  assert.deepEqual(one('sed -i "" s/a/b/ /p/f > /dev/null').verbWrites, ['/p/f'],
+    'sed is tabled, so it did');
+});
+
+test('G1b. a verb that takes its source away reports it as removed', () => {
+  const one = (cmd) => effectiveCommands(cmd, '/work')[0];
+  assert.deepEqual(one('mv /a/f /tmp/g').removes, ['/a/f']);
+  assert.deepEqual(one('mv /a/f /a/g /tmp/dir/').removes, ['/a/f', '/a/g']);
+  assert.deepEqual(one('mv -t /tmp/dir /a/f').removes, ['/a/f'], '-t makes every operand a source');
+  assert.deepEqual(one('ln /a/f /tmp/h').removes, ['/a/f'], 'a hard link is a second name for it');
+  assert.deepEqual(one('rsync -a --remove-source-files /a/ /tmp/').removes, ['/a/']);
+  // A copy READS its source. This is what keeps `cp <policy>/rules.json /tmp/` allowed.
+  assert.deepEqual(one('cp /a/f /tmp/g').removes, []);
+  assert.deepEqual(one('rsync -a /a/ /tmp/').removes, []);
+  assert.deepEqual(one('zip -r /tmp/z.zip /a').removes, []);
+  assert.deepEqual(one('tar -czf /tmp/t.tgz /a').removes, []);
+});
+
+test('G1c. perl and ruby edit in place, and homebrew basenames are the same verbs', () => {
+  assert.deepEqual(writes('perl -i -pe s/a/b/ /p/f'), ['/p/f']);
+  assert.deepEqual(writes("perl -i -e 's/a/b/' /p/f"), ['/p/f'], '-i beats the inline-script path');
+  assert.deepEqual(writes('perl -pe s/a/b/ /p/f'), [], 'without -i perl reads');
+  assert.deepEqual(writes('gsed -i s/a/b/ /p/f'), ['/p/f']);
+  assert.deepEqual(writes('gcp /a/f /p/g'), ['/p/g']);
+  assert.deepEqual(writes('grm /p/f'), ['/p/f']);
+  assert.deepEqual(effectiveCommands('gmv /p/f /tmp/g', '/work')[0].removes, ['/p/f']);
+});
+
+test('G3. every wrapper branch consumes a flag VALUE, in any order', () => {
+  for (const [cmd, want] of [
+    ['sudo --preserve-env=PATH -u root mempalace sync', 'mempalace sync'],
+    ['sudo -u root --preserve-env=PATH mempalace sync', 'mempalace sync'],
+    ['sudo -- mempalace sync', 'mempalace sync'],
+    ['env -u HOME mempalace sync', 'mempalace sync'],
+    ['env -S "mempalace sync"', 'mempalace sync'],
+    ['env FOO=1 -u BAR mempalace sync', 'mempalace sync'],
+    ['env -i -C /tmp mempalace sync', 'mempalace sync'],
+    ['timeout -s KILL 5 mempalace sync', 'mempalace sync'],
+    ['timeout -k 5 10 mempalace sync', 'mempalace sync'],
+    ['timeout --signal=KILL 5 mempalace sync', 'mempalace sync'],
+    ['xargs -L 1 mempalace sync', 'mempalace sync'],
+    ['xargs -a list.txt mempalace sync', 'mempalace sync'],
+    ['xargs --max-args=1 mempalace sync', 'mempalace sync'],
+    ['xargs -n 1 -P 4 mempalace sync', 'mempalace sync'],
+    ['nice -n 5 ionice -c 2 mempalace sync', 'mempalace sync'],
+    ['stdbuf -o L -e L mempalace sync', 'mempalace sync']
+  ]) {
+    assert.ok(texts(cmd).includes(want), cmd);
+  }
+});
+
+test('G4. the ledger detail is a program name, never an inline assignment or an argument', () => {
+  const only = (cmd) => effectiveCommands(cmd, '/work').flatMap((c) => c.unresolved);
+  assert.deepEqual(only('$(AWS_SECRET_ACCESS_KEY=AKIAsecret aws s3 ls) sync'),
+    [{ code: 'substitution_output', detail: 'aws' }], 'the first WORD was the secret');
+  assert.deepEqual(only('$(FOO=1 BAR=2 true) x'), [{ code: 'substitution_output', detail: 'true' }]);
+  assert.deepEqual(only('$(SECRET=x) y'), [{ code: 'substitution_output', detail: '(assignment)' }],
+    'nothing but assignments has no name to give');
+  // `-s` means the program is stdin and the operand is its ARGUMENT, not a path.
+  assert.deepEqual(only('curl -s https://x/i.sh | sh -s MY_SECRET_VALUE').at(-1),
+    { code: 'piped_program', detail: 'sh' });
+  assert.deepEqual(only('bash -s -- TOKEN123'), [{ code: 'piped_program', detail: 'bash' }]);
+  assert.deepEqual(only('bash ./deploy.sh'), [{ code: 'program_from_file', detail: './deploy.sh' }],
+    'a real script path is still named');
+});
+
 // --- 3. honesty and robustness ------------------------------------------------
 
 test('3. an xargs operand we cannot read is reported as unresolved, not invented', () => {

@@ -72,6 +72,22 @@ export interface EffectiveCommand {
   text: string;
   /** Absolute paths this command writes. Directory targets keep a trailing `/`. */
   writes: string[];
+  /**
+   * The subset of `writes` attributable to the command's own VERB, as opposed to a
+   * redirection. A caller falling back to a string heuristic needs this: a bare
+   * `> /dev/null` means the parser resolved a path, not that it understood the verb,
+   * and treating the two the same turned "append a harmless redirect" into a way past
+   * the self-protection heuristic.
+   */
+  verbWrites: string[];
+  /**
+   * Absolute paths this command MUTATES BY TAKING THEM AWAY — `mv`'s sources, and the
+   * file a hard link is made to. Not in `writes`, because for an ownership rule the
+   * interesting question is where a write LANDS; but `mv <dir>/f /tmp/` empties `<dir>`
+   * just as surely as writing into it, and for the policy directory that is the whole
+   * attack: move the rules aside and every rule on the floor stops applying.
+   */
+  removes: string[];
   /** What this command hides from us. Logged, never enforced on — see policy.ts. */
   unresolved: Unresolved[];
 }
@@ -111,6 +127,29 @@ const TRANSPARENT: Record<string, { values: Set<string>; firstOperandIsFile?: bo
 
 /** Shell keywords that may lead a segment once `;`/newline splitting is done. */
 const KEYWORDS = new Set(['do', 'done', 'then', 'else', 'elif', 'fi', 'esac', 'in', '!', '{', '}']);
+
+/**
+ * Homebrew's GNU coreutils on macOS install as `gsed`, `gcp`, … — the same verbs under
+ * a different basename, so a table keyed on the name misses every one of them.
+ */
+const BASENAME_ALIAS: Record<string, string> = {
+  gsed: 'sed', gcp: 'cp', gmv: 'mv', grm: 'rm', gln: 'ln', ginstall: 'install',
+  gtar: 'tar', gtouch: 'touch', gmkdir: 'mkdir', gchmod: 'chmod', gchown: 'chown',
+  gtruncate: 'truncate', gdd: 'dd', gtee: 'tee', grmdir: 'rmdir', gshred: 'shred',
+};
+
+/**
+ * Verbs whose SOURCE operands are mutated, not merely read.
+ *
+ * `mv` removes what it moves; `ln` (a hard link, and a symlink too) hands out a second
+ * name for the same file, and a later write through that name is invisible to a rule
+ * looking at the original path. `cp`, `tar` and `zip` are absent on purpose — reading a
+ * file to copy it elsewhere IS a read, which is why copying the rules out stays allowed.
+ */
+const SOURCE_MUTATED = new Set(['mv', 'ln']);
+
+/** In-place editors: a `-i` flag turns the operands into targets, exactly like sed. */
+const IN_PLACE_EDITORS = new Set(['sed', 'perl', 'ruby']);
 
 /** `cp a b` — the LAST operand is the destination, every earlier one is a source. */
 const LAST_ARG_DEST = new Set(['cp', 'mv', 'rsync', 'ln', 'install', 'scp', 'rclone', 'ditto']);
@@ -326,6 +365,27 @@ function tokenise(src: string): Tok[] {
   return out;
 }
 
+/**
+ * Skip a wrapper's flags, consuming the value of any flag that takes one.
+ *
+ * Shared by every wrapper branch on purpose. The bug this replaces was in four places
+ * at once: one branch got a value table and its siblings kept `while (startsWith('-'))
+ * i++`, so `env -u HOME`, `timeout -s KILL` and `xargs -L 1` each buried the real
+ * command one word deeper. Order matters too — a long `--flag=value` must not stop the
+ * scan, which is what let `sudo --preserve-env=PATH -u root mempalace sync` through.
+ */
+function skipFlags(argv: string[], from: number, values: Set<string>): number {
+  let i = from;
+  while (i < argv.length) {
+    const a = argv[i];
+    if (a === '--') return i + 1; // explicit end of options
+    if (!a.startsWith('-') || a === '-') break;
+    if (!a.includes('=') && values.has(a)) i++; // `-u root` — the user is not the command
+    i++;
+  }
+  return i;
+}
+
 /** Read to the matching close, honouring nesting. Returns [body, indexAfterClose]. */
 function readBalanced(src: string, from: number, open: string, close: string): [string, number] {
   let depth = 1;
@@ -362,6 +422,19 @@ const VALUE_FLAGS: Record<string, Set<string>> = {
   rsync: new Set(['--exclude', '--include', '--files-from', '-e']),
   tee: new Set(['--output-error']),
 };
+
+/** `env`'s own flags that swallow a value (`-u NAME` unsets it, `-C DIR` chdirs). */
+const ENV_VALUE_FLAGS = new Set(['-u', '--unset', '-C', '--chdir', '-S', '--split-string']);
+
+/** `timeout`'s flags that swallow a value, ahead of the DURATION operand. */
+const TIMEOUT_VALUE_FLAGS = new Set(['-s', '--signal', '-k', '--kill-after']);
+
+/** `xargs` flags that swallow a value. `-a FILE` means the operands come from a file
+ *  we do not read, which leaves them as unresolved as a pipe does. */
+const XARGS_VALUE_FLAGS = new Set([
+  '-n', '-P', '-d', '-s', '-L', '-E', '-a', '-e',
+  '--max-args', '--max-procs', '--delimiter', '--max-chars', '--max-lines', '--eof', '--arg-file',
+]);
 
 /** Operands that are not paths: chmod's mode, chown's owner. */
 const SKIP_FIRST_OPERAND = new Set(['chmod', 'chown', 'chgrp']);
@@ -414,8 +487,8 @@ export function realAbsolute(p: string, cwd: string): string {
  * string is handed back as a single command, so a caller's regex still has a
  * subject — degrading to the old behaviour rather than to "no command at all".
  */
-export function effectiveCommands(command: string, cwd = process.cwd()): EffectiveCommand[] {
-  const ctx: Ctx = { env: new Map(), cwd, depth: 0, out: [] };
+export function effectiveCommands(command: string, cwd?: string): EffectiveCommand[] {
+  const ctx: Ctx = { env: new Map(), cwd: cwd || process.cwd(), depth: 0, out: [] };
   try {
     walk(prepare(command), ctx);
   } catch {
@@ -423,7 +496,7 @@ export function effectiveCommands(command: string, cwd = process.cwd()): Effecti
   }
   if (!ctx.out.length) {
     const argv = command.trim().split(/\s+/).filter(Boolean);
-    return [{ argv, text: command.trim(), writes: [], unresolved: [] as Unresolved[] }];
+    return [{ argv, text: command.trim(), writes: [], verbWrites: [], removes: [], unresolved: [] as Unresolved[] }];
   }
   return ctx.out;
 }
@@ -516,29 +589,29 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
   let head = argv[0];
 
   // env VAR=v cmd … — the assignments are this command's, not the shell's.
-  if (head === 'env') {
+  if (basename(head) === 'env') {
     let i = 1;
     while (i < argv.length && /^\w+=/.test(argv[i])) { const eq = argv[i].indexOf('='); ctx.env.set(argv[i].slice(0, eq), argv[i].slice(eq + 1)); i++; }
-    while (i < argv.length && argv[i].startsWith('-')) i++;
+    // `-S "cmd args"` hands env a whole command line to split itself.
+    const split = flagValue(argv, ['-S', '--split-string']);
+    if (split !== null) { walk(prepare(split), deeper); return; }
+    i = skipFlags(argv, i, ENV_VALUE_FLAGS);
+    while (i < argv.length && /^\w+=/.test(argv[i])) { const eq = argv[i].indexOf('='); ctx.env.set(argv[i].slice(0, eq), argv[i].slice(eq + 1)); i++; }
     if (i < argv.length) return dispatch(argv.slice(i), redirects, herestring, ctx, hidden);
     return;
   }
   const wrapper = TRANSPARENT[basename(head)];
   if (wrapper) {
-    let i = 1;
-    while (i < argv.length && argv[i].startsWith('-') && argv[i] !== '-' && !argv[i].includes('=')) {
-      if (wrapper.values.has(argv[i])) i++; // `-u gpinkham` — the user is not the command
-      i++;
-    }
-    while (i < argv.length && argv[i].startsWith('--') && argv[i].includes('=')) i++;
+    let i = skipFlags(argv, 1, wrapper.values);
     // `script /dev/null cmd …` records into that file; only what follows is a command.
     if (wrapper.firstOperandIsFile && i + 1 < argv.length) i++;
     if (i < argv.length) return dispatch(argv.slice(i), redirects, herestring, ctx, hidden);
     return;
   }
   if (basename(head) === 'timeout') {
-    let i = 1;
-    while (i < argv.length && (argv[i].startsWith('-') || /^[\d.]+[smhd]?$/.test(argv[i]))) i++;
+    // Flags (with values), then the DURATION, then the command.
+    let i = skipFlags(argv, 1, TIMEOUT_VALUE_FLAGS);
+    if (i < argv.length && /^[\d.]+[smhd]?$/.test(argv[i])) i++;
     if (i < argv.length) return dispatch(argv.slice(i), redirects, herestring, ctx, hidden);
     return;
   }
@@ -550,10 +623,13 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
     // The inner command is the first non-flag operand; `-I TOKEN` names a
     // placeholder that stdin fills. A herestring is the one stdin we can read.
     let i = 1, token: string | null = null;
-    while (i < argv.length && argv[i].startsWith('-')) {
-      const m = /^-I(.*)$/.exec(argv[i]);
+    while (i < argv.length) {
+      const a = argv[i];
+      if (a === '--') { i++; break; }
+      if (!a.startsWith('-') || a === '-') break;
+      const m = /^-(?:I|-replace=?)(.*)$/.exec(a);
       if (m) token = m[1] || argv[++i] || null;
-      else if (argv[i] === '-n' || argv[i] === '-P' || argv[i] === '-d') i++;
+      else if (!a.includes('=') && XARGS_VALUE_FLAGS.has(a)) i++;
       i++;
     }
     const inner = argv.slice(i);
@@ -566,15 +642,23 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
     return;
   }
 
-  const base = basename(head);
+  const raw = basename(head);
+  const base = BASENAME_ALIAS[raw] ?? raw;
   if (SHELL_DASH_C.has(base)) {
     const ci = argv.findIndex((a, k) => k > 0 && (a === '-c' || a === '-lc' || a === '-cl'));
     if (ci !== -1 && argv[ci + 1] !== undefined) { walk(prepare(argv[ci + 1]), deeper); return; }
     // No -c: the program is a script FILE we do not open, or it is stdin — which is
     // what `curl … | sh` is. Either way every command it runs is invisible here.
-    const file = argv.slice(1).find((a) => !a.startsWith('-'));
-    hidden = [...hidden, file
-      ? { code: 'program_from_file', detail: file.slice(0, 200) }
+    //
+    // `-s` means "read the program from stdin and pass the operands to IT", so an
+    // operand there is an ARGUMENT, not a path — and `curl … | sh -s SECRET` is exactly
+    // the shape that put a planted secret in the ledger. Only call it a file when it
+    // looks like one and nothing says otherwise.
+    const readsStdin = argv.some((a, k) => k > 0 && /^-[a-zA-Z]*s/.test(a));
+    const operand = argv.slice(1).find((a) => !a.startsWith('-'));
+    const looksLikePath = !!operand && (operand.includes('/') || /\.[a-z]{1,4}$/i.test(operand));
+    hidden = [...hidden, !readsStdin && operand && looksLikePath
+      ? { code: 'program_from_file', detail: operand.slice(0, 200) }
       : { code: 'piped_program', detail: base }];
   }
   if (base === 'source' || base === '.') {
@@ -593,12 +677,17 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
     // `python3 -m mempalace sync` IS `mempalace sync`.
     return dispatch([argv[2], ...argv.slice(3)], redirects, herestring, ctx, hidden);
   }
-  const inlineFlags = INLINE_SCRIPT[base];
+  // `perl -i -e 's/a/b/' f` edits f in place; the inline-script branch below would read
+  // the script for write CALLS and find none, so in-place editing is settled first.
+  const editsInPlace = IN_PLACE_EDITORS.has(base)
+    && argv.slice(1).some((a) => /^-[a-zA-Z]*i/.test(a) || a === '--in-place' || a.startsWith('--in-place='));
+  const inlineFlags = editsInPlace ? undefined : INLINE_SCRIPT[base];
   if (inlineFlags) {
     const fi = argv.findIndex((a, k) => k > 0 && inlineFlags.includes(a));
     if (fi !== -1 && argv[fi + 1] !== undefined) {
       const script = argv[fi + 1];
-      record(ctx, [base, ...argv.slice(1)], [...redirects, ...inlineTargets(script)], hidden);
+      const scriptWrites = inlineTargets(script);
+      record(ctx, [base, ...argv.slice(1)], [...redirects, ...scriptWrites], hidden, scriptWrites);
       // A string the script hands to a shell is a command, so parse it as one.
       for (const m of script.matchAll(EXEC_API)) walk(prepare(m[2]), deeper);
       return;
@@ -608,7 +697,8 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
 
   // `git -C dir …` runs in dir; it writes no path we track, but a later command in
   // the same line does not inherit that, so only argv is normalised here.
-  record(ctx, [base, ...argv.slice(1)], [...redirects, ...verbTargets(base, argv)], hidden);
+  const verbWrites = verbTargets(base, argv);
+  record(ctx, [base, ...argv.slice(1)], [...redirects, ...verbWrites], hidden, verbWrites, sourceTargets(base, argv));
 }
 
 /** Paths a known mutating verb writes, given its argv. */
@@ -621,7 +711,8 @@ function verbTargets(base: string, argv: string[]): string[] {
     if (a.startsWith('-') && a !== '-') {
       flags.push(a);
       // `sed -e s/a/b/ f` — the script is the flag's value, not a file to rewrite.
-      if (takesValue.has(a)) i++;
+      // perl and ruby cluster it (`-pe`, `-ne`, `-i -pe`), so match the cluster too.
+      if (takesValue.has(a) || (IN_PLACE_EDITORS.has(base) && /^-[a-zA-Z]*[ef]$/.test(a))) i++;
       continue;
     }
     operands.push(a);
@@ -632,13 +723,15 @@ function verbTargets(base: string, argv: string[]): string[] {
     // `install -d a b` creates directories; there is no source among the operands.
     if (base === 'install' && flags.some((f) => /^-[a-zA-Z]*d$/.test(f) || f === '--directory')) return operands;
   }
-  if (base === 'sed') {
+  if (IN_PLACE_EDITORS.has(base)) {
     if (!flags.some((f) => /^-[a-zA-Z]*i/.test(f) || f === '--in-place' || f.startsWith('--in-place='))) return [];
     // BSD `sed -i '' script file` leaves an empty operand; the script is the first
     // real operand unless -e/-f already supplied it.
     const real = operands.filter((o) => o !== '');
+    // `-e`/`-f` supply the script, so every operand is a file; otherwise the first
+    // operand IS the script. perl's `-pe`/`-ne` clusters count as supplying it.
     const suppliedScript = flags.some((f) => f === '-e' || f === '-f' || f === '--expression' || f === '--file'
-      || f.startsWith('--expression=') || f.startsWith('--file='));
+      || f.startsWith('--expression=') || f.startsWith('--file=') || /^-[a-zA-Z]*e$/.test(f));
     return suppliedScript ? real : real.slice(1);
   }
   if (base === 'dd') return argv.filter((a) => a.startsWith('of=')).map((a) => a.slice(3));
@@ -658,6 +751,21 @@ function verbTargets(base: string, argv: string[]): string[] {
   if (ALL_ARGS_TARGET.has(base)) return SKIP_FIRST_OPERAND.has(base) ? operands.slice(1) : operands;
   if (LAST_ARG_DEST.has(base)) return operands.length >= 2 ? [operands[operands.length - 1]] : [];
   return [];
+}
+
+/** Operands a source-mutating verb takes away: everything but its destination. */
+function sourceTargets(base: string, argv: string[]): string[] {
+  if (!SOURCE_MUTATED.has(base) && !(base === 'rsync' && argv.includes('--remove-source-files'))) return [];
+  const operands: string[] = [];
+  const takesValue = VALUE_FLAGS[base] ?? new Set<string>();
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('-') && a !== '-') { if (takesValue.has(a) || TARGET_DIR_FLAGS.includes(a)) i++; continue; }
+    operands.push(a);
+  }
+  // With `-t DIR` the destination is the flag's value, so every operand is a source.
+  if (flagValue(argv, TARGET_DIR_FLAGS) !== null) return operands;
+  return operands.slice(0, -1);
 }
 
 /** A flag's value, whether written `-t DIR`, `--target-directory DIR` or `=DIR`. */
@@ -692,10 +800,21 @@ function inlineTargets(script: string): string[] {
   return out;
 }
 
-/** The first word of a command string — a program name, safe to put in a ledger. */
+/**
+ * The program a command string runs — a name, safe to put in a ledger.
+ *
+ * Leading `VAR=value` words are skipped rather than reported: for
+ * `$(AWS_SECRET_ACCESS_KEY=… aws s3 ls)` the first word IS the secret, and the ledger's
+ * contract is a structural token, never an argument value. With nothing but
+ * assignments there is no name to give, so it says so.
+ */
 function programOf(src: string): string {
-  const [first] = src.trim().split(/\s+/);
-  return (first ?? '').slice(0, 60) || '(empty)';
+  for (const w of src.trim().split(/\s+/)) {
+    if (!w) continue;
+    if (/^\w+=/.test(w)) continue;
+    return w.slice(0, 60);
+  }
+  return src.trim() ? '(assignment)' : '(empty)';
 }
 
 /** Variable names still unexpanded in these words, if any. */
@@ -707,12 +826,18 @@ function unexpandedVars(words: string[]): Unresolved[] {
   return out;
 }
 
-function record(ctx: Ctx, argv: string[], writes: string[], unresolved: Unresolved[]): void {
+function record(
+  ctx: Ctx, argv: string[], writes: string[], unresolved: Unresolved[],
+  verbWrites: string[] = [], removes: string[] = []
+): void {
   if (ctx.out.length >= MAX_COMMANDS) return;
+  const abs = (w: string) => realAbsolute(w, ctx.cwd);
   ctx.out.push({
     argv,
     text: argv.map(requote).join(' '),
-    writes: writes.map((w) => realAbsolute(w, ctx.cwd)),
+    writes: writes.map(abs),
+    verbWrites: verbWrites.map(abs),
+    removes: removes.map(abs),
     // A target holding `$SOMETHING` was resolved against a name we never saw, so the
     // absolute path above is a guess at best. Say so rather than only recording it.
     unresolved: [...unresolved, ...unexpandedVars(writes)],

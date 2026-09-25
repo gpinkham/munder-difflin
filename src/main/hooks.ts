@@ -355,7 +355,10 @@ export class HookServer {
           hook_event_name: event,
           agent_id: agentId ?? null,
           tool_name: p.tool_name,
-          tool_input: p.tool_input
+          tool_input: p.tool_input,
+          // The agent shell's cwd, not ours: a relative write target means nothing
+          // without it, and the daemon's own cwd is not where the agent is standing.
+          cwd: p.cwd
         });
         if (v.decision !== 'allow') {
           this.emit(agentId, event, p);
