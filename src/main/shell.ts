@@ -432,6 +432,9 @@ interface Ctx {
   cwdKnown: boolean;
   depth: number;
   out: EffectiveCommand[];
+  /** The command on the LEFT of a `|` feeding this one, when it was recorded. Lets
+   *  `find <dir> | xargs rm` know what xargs is being handed. Never inherited. */
+  pipeIn?: EffectiveCommand | null;
 }
 
 /**
@@ -535,7 +538,18 @@ export function effectiveCommands(command: string, cwd?: string): EffectiveComma
 function walk(toks: Tok[], ctx: Ctx): void {
   if (ctx.depth > MAX_DEPTH) return;
   let seg: Tok[] = [];
-  const flush = () => { if (seg.length) simple(seg, ctx); seg = []; };
+  let piped = false;
+  let last: EffectiveCommand | null = null;
+  const flush = () => {
+    if (seg.length) {
+      const before = ctx.out.length;
+      ctx.pipeIn = piped ? last : null;
+      simple(seg, ctx);
+      ctx.pipeIn = null;
+      last = ctx.out.length > before ? ctx.out[ctx.out.length - 1] : null;
+    }
+    seg = [];
+  };
   for (let i = 0; i < toks.length; i++) {
     const t = toks[i];
     if (t.t === 'op' && (t.v === '(' || t.v === '{')) {
@@ -551,7 +565,11 @@ function walk(toks: Tok[], ctx: Ctx): void {
       i = j;
       continue;
     }
-    if (t.t === 'op' && [';', ';;', '&&', '||', '|', '&', '\n', ')', '}'].includes(t.v)) { flush(); continue; }
+    if (t.t === 'op' && [';', ';;', '&&', '||', '|', '&', '\n', ')', '}'].includes(t.v)) {
+      flush();
+      piped = t.v === '|';
+      continue;
+    }
     seg.push(t);
   }
   flush();
@@ -667,6 +685,15 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
     const words = herestring === null ? null : herestring.split(/\s+/).filter(Boolean);
     if (token && words) return dispatch(inner.flatMap((a) => (a === token ? words : [a])), redirects, null, ctx, hidden);
     if (!token && words) return dispatch([...inner, ...words], redirects, null, ctx, hidden);
+    // `find <dir> … | xargs rm`: the operands are unread, but they all come from under
+    // find's search roots, so deleting them empties those roots as surely as
+    // `find <dir> -delete` does. Recorded as written, and still flagged as unresolved.
+    const src = ctx.pipeIn;
+    if (src && src.argv[0] === 'find' && isDeleter(inner)) {
+      const roots = findSearchRoots(src.argv).map((r) => (/[/\\]$/.test(r) ? r : r + '/'));
+      record(ctx, inner, [...redirects, ...roots], [{ code: 'stdin_operand', detail: token ?? '(appended)' }], roots);
+      return;
+    }
     // stdin we cannot see: record it as it stands and say the operand is unknown.
     record(ctx, inner, redirects, [{ code: 'stdin_operand', detail: token ?? '(appended)' }]);
     return;
@@ -784,35 +811,71 @@ function verbTargets(base: string, argv: string[]): string[] {
   return [];
 }
 
-/** Verbs that, run by `find -exec`, delete what find hands them. */
-const FIND_EXEC_DELETERS = new Set(['rm', 'rmdir', 'unlink', 'shred']);
+/** Verbs that delete, or move away, what find or xargs hands them. `mv` counts: its
+ *  source is gone afterwards, which is what an ownership rule cares about. */
+const FIND_EXEC_DELETERS = new Set(['rm', 'rmdir', 'unlink', 'shred', 'mv']);
+
+/** Prefixes that run the next word as the command: `-exec sudo rm {} +`. */
+const EXEC_WRAPPERS = new Set(['sudo', 'doas', 'env', 'nice', 'nohup', 'command', 'time', 'ionice', 'chrt']);
+
+/**
+ * Does this argv delete what it is handed? The verb itself, through a wrapper
+ * (`sudo rm`), or inside `sh -c '…'` when the script runs a deleter.
+ */
+function isDeleter(argv: string[], depth = 0): boolean {
+  if (!argv.length || depth > 3) return false;
+  const raw = basename(argv[0]);
+  const base = BASENAME_ALIAS[raw] ?? raw;
+  if (FIND_EXEC_DELETERS.has(base)) return true;
+  if (EXEC_WRAPPERS.has(base)) {
+    let i = 1;
+    while (i < argv.length && (argv[i].startsWith('-') || /^\w+=/.test(argv[i]))) i++;
+    return isDeleter(argv.slice(i), depth + 1);
+  }
+  if (SHELL_DASH_C.has(base)) {
+    const ci = argv.findIndex((a, k) => k > 0 && /^-[a-z]*c[a-z]*$/.test(a));
+    const script = ci !== -1 ? argv[ci + 1] : undefined;
+    if (script === undefined) return false;
+    return effectiveCommands(script, '/').some((c) => isDeleter(c.argv, depth + 1));
+  }
+  return false;
+}
+
+/** `find`'s search roots: the operands before the first expression token. None means `.`.
+ *  Leading options come first and are skipped, including `-D debugopts` and `-O level`. */
+function findSearchRoots(argv: string[]): string[] {
+  const roots: string[] = [];
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i];
+    if (/^-(?:H|L|P)$/.test(a)) continue;
+    if (a === '-D') { i++; continue; }
+    if (/^-O\d*$/.test(a)) { if (a === '-O') i++; continue; }
+    if (a.startsWith('-') || a === '(' || a === '!' || a === ',') break;
+    roots.push(a);
+  }
+  if (!roots.length) roots.push('.');
+  return roots;
+}
 
 /**
  * The directories a `find` empties, or none.
  *
- * `find <dir> -delete` and `find <dir> -exec rm {} +` remove files under every search
- * root, so each root counts as written to, exactly as `rm -rf <dir>` would. Without this
- * the command had no target at all, so no ownership rule could see it (md-216). A
- * `find` with no mutating action stays a reader, as policy.ts's allowlist assumes.
- * Roots are the operands before the first expression token; none means `.`.
+ * `find <dir> -delete`, `find <dir> -exec rm {} +`, `-exec sudo rm`, `-exec mv {} /tmp`
+ * and `-exec sh -c 'rm "$@"'` remove files under every search root, so each root counts
+ * as written to, exactly as `rm -rf <dir>` would. Without this the command had no target
+ * at all, so no ownership rule could see it (md-216). A `find` with no deleting action
+ * stays a reader, as policy.ts's allowlist assumes.
  */
 function findDeleteRoots(argv: string[]): string[] {
   let deletes = argv.includes('-delete');
   for (let i = 1; i < argv.length && !deletes; i++) {
     if (!['-exec', '-execdir', '-ok', '-okdir'].includes(argv[i])) continue;
-    const verb = argv[i + 1];
-    if (verb && FIND_EXEC_DELETERS.has(BASENAME_ALIAS[basename(verb)] ?? basename(verb))) deletes = true;
+    let end = i + 1;
+    while (end < argv.length && argv[end] !== ';' && argv[end] !== '+') end++;
+    if (isDeleter(argv.slice(i + 1, end))) deletes = true;
   }
   if (!deletes) return [];
-  const roots: string[] = [];
-  for (let i = 1; i < argv.length; i++) {
-    const a = argv[i];
-    if (/^-(?:H|L|P)$/.test(a)) continue; // symlink-follow options come before the roots
-    if (a.startsWith('-') || a === '(' || a === '!' || a === ',') break;
-    roots.push(a);
-  }
-  if (!roots.length) roots.push('.');
-  return roots.map((r) => (/[/\\]$/.test(r) ? r : r + '/'));
+  return findSearchRoots(argv).map((r) => (/[/\\]$/.test(r) ? r : r + '/'));
 }
 
 /** Operands a source-mutating verb takes away: everything but its destination. */

@@ -441,3 +441,14 @@ test('md-216. find -delete / -exec rm writes its search roots; a plain find writ
   assert.deepEqual(writes('find /x -name a -print'), []);
   assert.deepEqual(writes('find /x -exec grep -l a {} +'), []);
 });
+
+test('md-217 N4. find hands its roots to -exec mv / sudo rm / sh -c rm, and to | xargs rm', () => {
+  assert.deepEqual(writes('find /x -name a -exec mv {} /tmp/ \;').filter((w) => w === '/x/'), ['/x/']);
+  assert.deepEqual(writes('find /x -exec sudo rm {} +'), ['/x/']);
+  assert.deepEqual(writes("find /x -exec sh -c 'rm \"$@\"' _ {} +"), ['/x/']);
+  assert.deepEqual(writes('find /x -print0 | xargs -0 rm -f'), ['/x/']);
+  assert.deepEqual(writes('find -D stat /x -delete'), ['/x/']);
+  assert.deepEqual(writes('find /x | xargs grep a'), [], 'xargs of a reader writes nothing');
+  assert.deepEqual(writes('ls /x | xargs rm'), [], 'only find is known to name paths under its roots');
+  assert.deepEqual(writes("find /x -exec sh -c 'grep a \"$@\"' _ {} +"), []);
+});
