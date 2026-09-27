@@ -733,6 +733,7 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
 
 /** Paths a known mutating verb writes, given its argv. */
 function verbTargets(base: string, argv: string[]): string[] {
+  if (base === 'find') return findDeleteRoots(argv);
   const takesValue = VALUE_FLAGS[base] ?? new Set<string>();
   const operands: string[] = [];
   const flags: string[] = [];
@@ -781,6 +782,37 @@ function verbTargets(base: string, argv: string[]): string[] {
   if (ALL_ARGS_TARGET.has(base)) return SKIP_FIRST_OPERAND.has(base) ? operands.slice(1) : operands;
   if (LAST_ARG_DEST.has(base)) return operands.length >= 2 ? [operands[operands.length - 1]] : [];
   return [];
+}
+
+/** Verbs that, run by `find -exec`, delete what find hands them. */
+const FIND_EXEC_DELETERS = new Set(['rm', 'rmdir', 'unlink', 'shred']);
+
+/**
+ * The directories a `find` empties, or none.
+ *
+ * `find <dir> -delete` and `find <dir> -exec rm {} +` remove files under every search
+ * root, so each root counts as written to, exactly as `rm -rf <dir>` would. Without this
+ * the command had no target at all, so no ownership rule could see it (md-216). A
+ * `find` with no mutating action stays a reader, as policy.ts's allowlist assumes.
+ * Roots are the operands before the first expression token; none means `.`.
+ */
+function findDeleteRoots(argv: string[]): string[] {
+  let deletes = argv.includes('-delete');
+  for (let i = 1; i < argv.length && !deletes; i++) {
+    if (!['-exec', '-execdir', '-ok', '-okdir'].includes(argv[i])) continue;
+    const verb = argv[i + 1];
+    if (verb && FIND_EXEC_DELETERS.has(BASENAME_ALIAS[basename(verb)] ?? basename(verb))) deletes = true;
+  }
+  if (!deletes) return [];
+  const roots: string[] = [];
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i];
+    if (/^-(?:H|L|P)$/.test(a)) continue; // symlink-follow options come before the roots
+    if (a.startsWith('-') || a === '(' || a === '!' || a === ',') break;
+    roots.push(a);
+  }
+  if (!roots.length) roots.push('.');
+  return roots.map((r) => (/[/\\]$/.test(r) ? r : r + '/'));
 }
 
 /** Operands a source-mutating verb takes away: everything but its destination. */

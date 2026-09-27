@@ -432,3 +432,12 @@ test('3d. rejoining argv cannot invent a command boundary that was not there', (
   assert.deepEqual(texts("grep -n 'a; mempalace sync' f"), ["grep -n 'a; mempalace sync' f"]);
   assert.deepEqual(texts('echo "two  spaces"'), ["echo 'two  spaces'"]);
 });
+
+test('md-216. find -delete / -exec rm writes its search roots; a plain find writes nothing', () => {
+  assert.deepEqual(writes("find /x -name '*.ts' -delete"), ['/x/']);
+  assert.deepEqual(writes('find /x /y -type f -exec rm -f {} +'), ['/x/', '/y/']);
+  assert.deepEqual(writes('find -L /x -delete'), ['/x/']);
+  assert.deepEqual(writes('find . -delete', '/work'), ['/work/']);
+  assert.deepEqual(writes('find /x -name a -print'), []);
+  assert.deepEqual(writes('find /x -exec grep -l a {} +'), []);
+});
