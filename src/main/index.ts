@@ -1339,7 +1339,9 @@ function writeFleetSnapshot(): void {
           onHold: !!a.onHold
         };
       });
-    hive.writeFleetSnapshot({ ts: now, agents });
+    // md-216: the guardrail's load status rides on every snapshot, so "is it enforcing
+    // anything" is one read of fleet.json, not a grep of log.jsonl.
+    hive.writeFleetSnapshot({ ts: now, agents, policy: hookServer.policyStatus() });
   } catch (e) {
     console.error('[fleet] snapshot failed:', e);
   }

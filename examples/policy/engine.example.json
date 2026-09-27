@@ -1,15 +1,18 @@
 {
   "_comment": [
-    "EXAMPLE ONLY. Copy to <hive>/policy/authority.json to activate.",
+    "EXAMPLE ONLY. Copy to <hive>/policy/engine.json to activate.",
     "",
-    "This file is never active from inside the repo: the engine reads only",
-    "<hive>/policy/authority.json, and with no such file the harness behaves exactly",
-    "as it did before this feature existed - nothing evaluated, nothing logged,",
-    "nothing denied.",
+    "This file is never active from inside the repo: the engine reads",
+    "<hive>/policy/engine.json (or, for installs made before md-216, an",
+    "authority.json written in THIS schema). <hive>/policy/authority.json in the",
+    "guardrail-hook schema (match.kind) belongs to bin/guardrail-hook.cjs and is",
+    "left alone: the two files sit side by side. With neither file the harness",
+    "behaves exactly as it did before this feature existed - nothing evaluated,",
+    "nothing logged, nothing denied.",
     "",
-    "Three rules is the intended size. Adding a fourth is a decision, not a",
-    "detail; by the tenth, adopt a real policy engine (OPA/Rego) instead of",
-    "growing the matcher vocabulary here.",
+    "Four rules. The fourth (cross-agent-workspace) was that decision, taken on",
+    "an observed incident (md-216), not added as a detail. By the tenth, adopt a",
+    "real policy engine (OPA/Rego) instead of growing the matcher vocabulary here.",
     "",
     "Every rule below ships mode: dry_run. In dry_run the rule is evaluated and",
     "logged but the action PROCEEDS. Promote one rule at a time to \"live\" only",
@@ -18,7 +21,7 @@
     "the work you would have judged.",
     "",
     "Matchers: tool | path_glob | path_not_glob | command_matches |",
-    "command_not_matches. Within a rule every key must match. Rules are tried in",
+    "command_not_matches | path_in_other_agent_workspace. Within a rule every key must match. Rules are tried in",
     "file order and the first match wins. For OR, write two rules.",
     "",
     "A Bash command is PARSED before it is matched, so what these matchers see is",
@@ -48,11 +51,35 @@
       "_on_error_why": "A bug in path matching must not be able to stop every agent from writing its own files. A missed write is one recoverable file; a false deny is the whole floor.",
       "_match_why": "Bash is in the tool list because most cross-agent writes are not Write calls: a redirection, cp/mv/rsync/ln/install into another folder, sed -i, tee, touch, rm, or a path inside node -e / python3 -c. The engine hands path_glob the paths the PARSED command writes, so a read of another agent (cat, ls, grep, diff, wc, head) still has no target and still cannot fire - reading another agent's files is explicitly allowed. path_not_glob is judged per path, so a command writing both your folder and someone else's is not exempted by its allowed half.",
       "match": {
-        "tool": ["Write", "Edit", "NotebookEdit", "Bash"],
+        "tool": [
+          "Write",
+          "Edit",
+          "NotebookEdit",
+          "Bash"
+        ],
         "path_glob": "**/hive/agents/*/**",
         "path_not_glob": "**/hive/agents/${AGENT_ID}/**"
       },
       "reason": "Agent folders are owned by their agent. Write your message to your own outbox/ instead - the harness delivers it. Reading another agent's files is fine."
+    },
+    {
+      "id": "cross-agent-workspace",
+      "description": "An agent may not write or delete inside another agent's workspace: its registered cwd, its isolated worktree, or its hive folder.",
+      "decision": "deny",
+      "mode": "dry_run",
+      "on_error": "allow",
+      "_on_error_why": "Fails open for the same reason as cross-agent-write: a matching bug must not stop the floor, and a miss is one recoverable checkout.",
+      "_match_why": "md-216: an agent ran rm -rf inside other agents' git worktrees, outside hive/agents/, and nothing fired, because cross-agent-write only knows the hive folder. The workspace list comes from the registry at evaluation time (every live agent's cwd, hive/agents/<id> and <harnessHome>/worktrees/<id>), and a root counts as someone's only if exactly one agent registered it and it does not contain another agent's root. That is what keeps a shared repo cwd (every agent starting in the same directory) and the orchestrator's cwd (which contains the whole hive) from making every write a trespass. Bash writes AND removes are judged, so rm -rf, mv-away, find -delete and git clean/checkout-style overwrites that the parser attributes to a path all count. KNOWN GAP: a worktree an agent creates for itself without registering it (git worktree add from a shared cwd) is nobody's, so it is not protected either.",
+      "match": {
+        "tool": [
+          "Write",
+          "Edit",
+          "NotebookEdit",
+          "Bash"
+        ],
+        "path_in_other_agent_workspace": true
+      },
+      "reason": "That directory is another agent's workspace (its checkout, worktree or folder). Do not write or delete there. Ask its owner, or god, to make the change, and do your own work in your own worktree."
     },
     {
       "id": "destructive-shared-state",

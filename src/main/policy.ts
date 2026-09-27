@@ -63,7 +63,43 @@ const MATCHERS = [
   'path_not_glob',
   'command_matches',
   'command_not_matches',
+  'path_in_other_agent_workspace',
 ] as const;
+
+/**
+ * The engine's own policy file, and the one it falls back to.
+ *
+ * TWO FILES, ON PURPOSE (md-216). `authority.json` belongs to `bin/guardrail-hook.cjs`,
+ * whose schema (`match.kind`, `mode: "DRY_RUN"`) predates this engine and still writes
+ * the `firing` rows in decisions.jsonl. The engine read the same file, rejected every
+ * rule with `unknown matcher "kind"`, and enforced nothing on either floor for as long
+ * as it was installed. Sharing one file between two schemas means one reader is always
+ * wrong, so each reader gets its own file and neither has to understand the other.
+ * `authority.json` is still honoured when it is written in THIS schema, because that is
+ * what the example pack told people to do before the split.
+ */
+export const ENGINE_POLICY_FILE = 'engine.json';
+export const LEGACY_POLICY_FILE = 'authority.json';
+
+/** One agent's workspace roots, as the harness knows them: its registered cwd, its
+ *  hive folder, and its isolated worktree. Supplied by HookServer from the registry. */
+export interface AgentWorkspace {
+  agentId: string;
+  roots: string[];
+}
+
+/** What `status` reports. The UI, fleet.json and the startup log all read this one
+ *  shape, so "how many rules are actually loaded" has a single answer. */
+export interface PolicyStatus {
+  configured: boolean;
+  /** The file the rules came from, or the file that failed. Null when unconfigured. */
+  file: string | null;
+  rulesLoaded: number;
+  ruleIds: string[];
+  /** Why no rules are loaded when a policy is configured. Null when all is well. */
+  error: string | null;
+  loadedAt: string | null;
+}
 
 /**
  * Write indicators for the Bash half of policy self-protection: a redirection, a
@@ -172,6 +208,13 @@ export interface PolicyRule {
     path_not_glob?: string;
     command_matches?: string;
     command_not_matches?: string;
+    /**
+     * true: fires when a path this call writes or removes lies inside ANOTHER agent's
+     * workspace (registered cwd, hive folder or isolated worktree) and not inside the
+     * acting agent's own. A root that several agents share, or that contains another
+     * agent's root, is nobody's: see `ownedRoots`.
+     */
+    path_in_other_agent_workspace?: boolean;
   };
 }
 
@@ -296,6 +339,7 @@ export class PolicyEngine {
    *  a policy file present but empty of rules must still protect itself. */
   private configured = false;
   private defaults: { mode: PolicyMode; on_error: 'allow' | 'deny' } = { mode: 'dry_run', on_error: 'allow' };
+  private loadedAt: string | null = null;
 
   /** Denominator for the false-positive rate. Counted in memory, never logged
    *  per action: allows are the overwhelming majority and appendLog is a
@@ -309,10 +353,14 @@ export class PolicyEngine {
     private log: (row: Record<string, unknown>) => void,
     /** Provider names currently spawned that cannot be governed, so the engine
      *  can name them at load time instead of leaving it to be discovered. */
-    private unenforceableProviders: () => string[] = () => []
+    private unenforceableProviders: () => string[] = () => [],
+    /** Every agent's workspace roots, for `path_in_other_agent_workspace`. Read per
+     *  evaluation that needs it, because agents are spawned and archived while the
+     *  daemon runs. Optional: without it that matcher never fires. */
+    private workspaces: () => AgentWorkspace[] = () => []
   ) {
     this.policyDir = hiveRoot ? join(hiveRoot, 'policy') : '';
-    this.policyPath = this.policyDir ? join(this.policyDir, 'authority.json') : '';
+    this.policyPath = this.policyDir ? join(this.policyDir, ENGINE_POLICY_FILE) : '';
   }
 
   /**
@@ -326,8 +374,17 @@ export class PolicyEngine {
     this.rules = [];
     this.loadError = null;
     this.configured = false;
-    if (!this.policyPath || !existsSync(this.policyPath)) return; // unconfigured → inert
+    this.loadedAt = null;
+    if (!this.policyDir) return;
+    const enginePath = join(this.policyDir, ENGINE_POLICY_FILE);
+    const legacyPath = join(this.policyDir, LEGACY_POLICY_FILE);
+    const hasEngine = existsSync(enginePath);
+    const hasLegacy = existsSync(legacyPath);
+    if (!hasEngine && !hasLegacy) { this.policyPath = enginePath; return; } // unconfigured → inert
+    // Either file arms policy self-protection: an install that has any policy at all
+    // must not let an agent rewrite it, whichever reader the file was written for.
     this.configured = true;
+    this.policyPath = hasEngine ? enginePath : legacyPath;
 
     let parsed: PolicyFile;
     try {
@@ -335,8 +392,18 @@ export class PolicyEngine {
     } catch (e) {
       // Refuse a half-parsed policy. Partial enforcement is worse than none,
       // because it is believed.
-      this.loadError = e instanceof Error ? e.message : String(e);
-      this.log({ kind: 'policy-load-failed', path: this.policyPath, error: this.loadError });
+      this.fail(e instanceof Error ? e.message : String(e));
+      return;
+    }
+
+    if (!hasEngine && isHookSchema(parsed)) {
+      // The one layout that silently enforced nothing for as long as it was installed:
+      // only the shell hook's file is present. Say so in words an operator can act on,
+      // instead of "unknown matcher" three times.
+      this.fail(
+        `${LEGACY_POLICY_FILE} is the guardrail-hook schema (match.kind), which this engine does not read; `
+        + `add ${ENGINE_POLICY_FILE} beside it (see examples/policy/${ENGINE_POLICY_FILE}). 0 engine rules loaded.`
+      );
       return;
     }
 
@@ -348,24 +415,44 @@ export class PolicyEngine {
       rules.push(rule);
     }
     if (invalid.length) {
-      this.loadError = invalid.map((i) => `${i.id}: ${i.why}`).join('; ');
-      this.log({ kind: 'policy-load-failed', path: this.policyPath, error: this.loadError, invalid });
+      this.fail(invalid.map((i) => `${i.id}: ${i.why}`).join('; '), invalid);
       return; // all-or-nothing: a policy you cannot fully trust is not loaded
     }
 
     if (parsed.defaults?.mode) this.defaults.mode = parsed.defaults.mode;
     if (parsed.defaults?.on_error) this.defaults.on_error = parsed.defaults.on_error;
     this.rules = rules;
+    this.loadedAt = new Date().toISOString();
 
     const gaps = this.unenforceableProviders();
     this.log({
       kind: 'policy-loaded',
       path: this.policyPath,
+      rules_loaded: rules.length,
       rules: rules.map((r) => ({ id: r.id, decision: r.decision, mode: r.mode ?? this.defaults.mode })),
       // Named, not a static warning. A generic "some providers may not be
       // governed" gets skimmed; a list of the agents running right now does not.
       unenforceable_providers: gaps,
     });
+  }
+
+  /** A configured policy that loaded no rules. One place, so every failure is logged
+   *  the same way and `status` reports the same string the log carries. */
+  private fail(error: string, invalid?: Array<{ id: string; why: string }>): void {
+    this.loadError = error;
+    this.log({ kind: 'policy-load-failed', path: this.policyPath, rules_loaded: 0, error, ...(invalid ? { invalid } : {}) });
+  }
+
+  /** The single answer to "is the guardrail enforcing anything?". */
+  get status(): PolicyStatus {
+    return {
+      configured: this.configured,
+      file: this.configured ? this.policyPath : null,
+      rulesLoaded: this.rules.length,
+      ruleIds: this.rules.map((r) => r.id),
+      error: this.loadError,
+      loadedAt: this.loadedAt,
+    };
   }
 
   /** Reason a rule is unusable, or null. Rejected at load, never at evaluation. */
@@ -384,6 +471,9 @@ export class PolicyEngine {
       const g = rule.match[k];
       // An unanchored glob such as "agents/*/**" would match relative to nothing.
       if (g && !g.startsWith('/') && !g.startsWith('**')) return `${k} must be absolute or start with ** (got "${g}")`;
+    }
+    if (rule.match.path_in_other_agent_workspace !== undefined && rule.match.path_in_other_agent_workspace !== true) {
+      return 'path_in_other_agent_workspace must be true (omit the key to turn it off)';
     }
     for (const k of ['command_matches', 'command_not_matches'] as const) {
       const r = rule.match[k];
@@ -642,6 +732,20 @@ export class PolicyEngine {
       }
     }
 
+    if (m.path_in_other_agent_workspace) {
+      // No agent id: we cannot say whose workspace is "other", so nothing is.
+      if (!p.agent_id) return null;
+      const paths = this.paths(p, ctx).map((x) => normalisePath(x, p.cwd));
+      if (!paths.length) return null;
+      const roots = ownedRoots(this.workspaces());
+      const foreign = paths.some((x) => {
+        const owner = ownerOf(x, roots);
+        return owner !== null && owner !== p.agent_id;
+      });
+      if (!foreign) return null;
+      matchedOn = 'path_in_other_agent_workspace';
+    }
+
     return matchedOn;
   }
 
@@ -777,6 +881,64 @@ export class PolicyEngine {
   get ruleCount(): number { return this.rules.length; }
   get error(): string | null { return this.loadError; }
   get path(): string { return this.policyPath; }
+}
+
+/**
+ * True when a parsed policy file is written for bin/guardrail-hook.cjs rather than for
+ * this engine: its rules carry `match.kind`, or an upper-case mode. Either marker is
+ * enough — no engine rule can have one and still validate.
+ */
+export function isHookSchema(parsed: PolicyFile): boolean {
+  return (parsed.rules ?? []).some((r) => {
+    const rule = r as unknown as { match?: Record<string, unknown>; mode?: unknown };
+    return (rule?.match && 'kind' in rule.match) || rule?.mode === 'DRY_RUN' || rule?.mode === 'LIVE';
+  });
+}
+
+/**
+ * The workspace roots that belong to exactly one agent.
+ *
+ * A root is OWNED only when (a) no other agent registered the same root and (b) it
+ * does not contain another agent's root. Both exclusions are what keep this from
+ * firing on ordinary work. On a floor where every agent starts in the same repo
+ * directory, that directory is everyone's, so writing to it is nobody's business. The
+ * orchestrator's cwd usually contains the whole hive, so it is a container, not a
+ * workspace. What is left is the case that went unnoticed: an agent's own worktree or
+ * checkout, which is where `rm -rf` into a colleague's work actually lands.
+ */
+export function ownedRoots(workspaces: AgentWorkspace[]): Array<{ agentId: string; root: string }> {
+  const byRoot = new Map<string, Set<string>>();
+  for (const w of workspaces) {
+    for (const r of w.roots) {
+      if (!r) continue;
+      const root = normalisePath(r).replace(/\/+$/, '') || '/';
+      if (!byRoot.has(root)) byRoot.set(root, new Set());
+      byRoot.get(root)!.add(w.agentId);
+    }
+  }
+  const all = [...byRoot.keys()];
+  const out: Array<{ agentId: string; root: string }> = [];
+  for (const [root, owners] of byRoot) {
+    if (owners.size !== 1) continue;
+    const [agentId] = owners;
+    const prefix = root === '/' ? '/' : root + '/';
+    const containsOther = all.some((o) => o !== root && o.startsWith(prefix)
+      && [...byRoot.get(o)!].some((id) => id !== agentId));
+    if (containsOther) continue;
+    out.push({ agentId, root });
+  }
+  return out;
+}
+
+/** The agent whose owned root holds this absolute path, or null. Deepest root wins. */
+function ownerOf(abs: string, roots: Array<{ agentId: string; root: string }>): string | null {
+  let best: { agentId: string; root: string } | null = null;
+  for (const r of roots) {
+    if (abs === r.root || abs.startsWith(r.root === '/' ? '/' : r.root + '/')) {
+      if (!best || r.root.length > best.root.length) best = r;
+    }
+  }
+  return best ? best.agentId : null;
 }
 
 /** The ledger's id shape, matching the rows the shell guardrail already writes. */

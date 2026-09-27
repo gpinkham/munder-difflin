@@ -11,8 +11,22 @@ prompts and memory files, so they depend on salience. Under task pressure an age
 optimises for the immediate goal over a rule it is not actively holding. This moves
 those rules from remembered to enforced.
 
-**Nothing happens until you opt in.** With no `<hive>/policy/authority.json`, the
-engine loads nothing, evaluates nothing, logs nothing and denies nothing.
+**Nothing happens until you opt in.** With no `<hive>/policy/engine.json` (and no
+`authority.json`), the engine loads nothing, evaluates nothing, logs nothing and
+denies nothing.
+
+**Two files, side by side.** `engine.json` is this engine's policy.
+`authority.json` belongs to the older shell guardrail (`hive/bin/guardrail-hook.cjs`,
+schema `match.kind`, `mode: "DRY_RUN"`) and is left exactly as it is. Before md-216
+both readers shared `authority.json`, so the engine rejected every rule with
+`unknown matcher "kind"` and enforced nothing. An `authority.json` in THIS schema is
+still read when there is no `engine.json`. A hook-schema `authority.json` with no
+`engine.json` now fails loudly: god gets a message at startup.
+
+**Checking it loaded.** Every start logs `policy-status` with `rules_loaded` to
+`log.jsonl` and prints `[policy] rules loaded: N` on stdout; `fleet.json` carries
+the same thing under `policy` on every snapshot. `rules_loaded: 0` with an `error`
+means nothing is enforced.
 
 ## What this is not
 
@@ -30,7 +44,7 @@ That trade is deliberately not taken.
 
 ```sh
 mkdir -p <hive>/policy
-cp examples/policy/authority.example.json <hive>/policy/authority.json
+cp examples/policy/engine.example.json <hive>/policy/engine.json
 # then restart the harness — the policy is read once, at daemon start
 ```
 

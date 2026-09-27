@@ -12,6 +12,7 @@
  */
 import { createServer, type Server } from 'node:net';
 import { existsSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { Notification, type WebContents } from 'electron';
 import type { HiveManager } from './hive';
 import type { HarnessConfig } from './config';
@@ -19,7 +20,7 @@ import type { ControlRegistry } from './control';
 import type { CircuitBreaker } from './breaker';
 import { estimateCostUsd } from './pricing';
 import { validateHookEvent } from '../shared/hookEvents';
-import { PolicyEngine } from './policy';
+import { PolicyEngine, type AgentWorkspace, type PolicyStatus } from './policy';
 
 /** Maximum JSON payload bytes in one newline-delimited hook frame. */
 const MAX_HOOK_FRAME_BYTES = 256 * 1024;
@@ -150,6 +151,71 @@ export class HookServer {
     });
     this.server.on('error', (e) => console.error('[hive] hook server error:', e));
     this.server.listen(sock);
+    this.announcePolicy();
+  }
+
+  /**
+   * Load the policy at START, not on the first tool call, and say what loaded.
+   *
+   * md-216: the engine rejected every rule on both floors and nothing noticed, because
+   * the only evidence was one `policy-load-failed` row in log.jsonl written whenever the
+   * first PreToolUse happened to arrive. Now "rules loaded: N" is a startup fact in the
+   * log and on stdout, fleet.json carries the same status on every snapshot, and a
+   * configured policy that loaded nothing is sent to god as a message, once per start,
+   * where somebody reads it.
+   */
+  private announcePolicy(): void {
+    let status: PolicyStatus;
+    try { status = this.policyEngine().status; } catch (e) {
+      console.error('[policy] load threw:', e);
+      return;
+    }
+    if (!status.configured) return; // unconfigured → inert, and quiet about it
+    this.hive.appendLog({
+      kind: 'policy-status',
+      rules_loaded: status.rulesLoaded,
+      rule_ids: status.ruleIds,
+      file: status.file,
+      error: status.error,
+    } as Parameters<HiveManager['appendLog']>[0]);
+    console.log(`[policy] rules loaded: ${status.rulesLoaded} (${status.file})${status.error ? ` FAILED: ${status.error}` : ''}`);
+    if (status.error) {
+      try {
+        this.hive.send({
+          to: 'god',
+          act: 'inform',
+          subject: 'Guardrail policy failed to load: 0 rules enforced',
+          body: `The in-app guardrail found a policy at ${status.file} but loaded NO rules, so nothing is being checked `
+            + `(policy self-protection is still on). Reason: ${status.error}\n`
+            + 'Fix the file and restart the app; fleet.json "policy" shows the current status.',
+          requires_reply: false,
+        }, 'guardrail');
+      } catch (e) { console.error('[policy] could not notify god:', e); }
+    }
+  }
+
+  /** Current guardrail status, for fleet.json. Null when no hive is configured. */
+  policyStatus(): PolicyStatus | null {
+    if (!this.hive.root()) return null;
+    try { return this.policyEngine().status; } catch { return null; }
+  }
+
+  /**
+   * Every live agent's workspace roots: its registered cwd, its hive folder and the
+   * isolated worktree the harness gives a worker. Archived agents are left out; their
+   * worktrees are cleaned up by whoever archived them, and that is not a trespass.
+   */
+  private agentWorkspaces(): AgentWorkspace[] {
+    const root = this.hive.root();
+    if (!root) return [];
+    const home = this.getConfig().harnessHome;
+    const reg = this.hive.registry();
+    return Object.entries(reg.agents)
+      .filter(([, a]) => !a.archived)
+      .map(([id, a]) => ({
+        agentId: id,
+        roots: [a.cwd, join(root, 'agents', id), home ? join(home, 'worktrees', id) : ''].filter(Boolean) as string[],
+      }));
   }
 
   /** Build the policy engine once, on first PreToolUse. */
@@ -162,7 +228,8 @@ export class HookServer {
         // rather than left to be discovered: pi and opencode post fire-and-forget,
         // and the qwen proxy synthesizes PostToolUse only (it observes traffic
         // after the fact, so there is no before-the-action boundary to hold).
-        () => ['pi', 'opencode', 'qwen']
+        () => ['pi', 'opencode', 'qwen'],
+        () => { try { return this.agentWorkspaces(); } catch { return []; } }
       );
       this.policy.load();
     }

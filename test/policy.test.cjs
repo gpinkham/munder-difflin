@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 
-const { PolicyEngine, globToRegExp, interpolate, digest } = loadTs('src/main/policy.ts');
+const { PolicyEngine, globToRegExp, interpolate, digest, ownedRoots, isHookSchema } = loadTs('src/main/policy.ts');
 
 /** A throwaway hive root. `rules === null` means "no policy file at all". */
 function hive(rules, defaults) {
@@ -388,7 +388,7 @@ test('defaults.mode applies to rules that omit mode', () => {
 
 /** The shipped example pack, forced live — the rules an operator actually gets. */
 function shipped() {
-  const pack = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'examples/policy/authority.example.json'), 'utf8'));
+  const pack = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'examples/policy/engine.example.json'), 'utf8'));
   for (const r of pack.rules) r.mode = 'live';
   const { e } = engine(pack.rules);
   return e;
@@ -397,7 +397,7 @@ function shipped() {
 test('12. the shipped pack loads with every rule valid', () => {
   const e = shipped();
   assert.equal(e.error, null);
-  assert.equal(e.ruleCount, 3);
+  assert.equal(e.ruleCount, 4);
 });
 
 test('12a. a disguised mempalace sync is denied however it is spelled', () => {
@@ -1166,4 +1166,207 @@ test('globToRegExp: regex metacharacters in a path are literal', () => {
   assert.equal(globToRegExp('/a+b/*').test('/a+b/c'), true);
   assert.equal(globToRegExp('/a+b/*').test('/aab/c'), false);
   assert.equal(globToRegExp('/a.b/*').test('/axb/c'), false, '. must not be a wildcard');
+});
+
+// --- 21. md-216: the engine never loaded its rules --------------------------------
+//
+// On both floors the engine read hive/policy/authority.json, which is written in the
+// shell hook's schema, rejected all three rules with `unknown matcher "kind"`, and
+// enforced nothing while every other signal said it was installed.
+
+/** The exact shape of the live floor's hook-schema authority.json (abridged). */
+const HOOK_SCHEMA = {
+  version: 1,
+  escalate_to: 'god',
+  rules: [
+    { id: 'cross-agent-write', mode: 'DRY_RUN', decision: 'deny', on_error: 'open', match: { kind: 'cross_agent_write' }, reason: 'owned' },
+    { id: 'destructive-shared-state', mode: 'DRY_RUN', decision: 'deny', on_error: 'closed', match: { kind: 'bash_regex', pattern: '(^|[;&|]\\s*|\\n)mempalace\\s+(sync|repair)\\b' }, reason: 'irreversible' },
+    { id: 'remote-push', mode: 'DRY_RUN', decision: 'ask', on_error: 'open', match: { kind: 'bash_regex', pattern: '(^|[;&|]\\s*)git\\s+push\\b' }, reason: 'ask' },
+  ],
+};
+
+/** A hive with the given files in policy/ — `{ 'authority.json': obj, 'engine.json': obj }`. */
+function hiveWith(files, workspaces) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'md-policy-216-'));
+  fs.mkdirSync(path.join(root, 'policy'), { recursive: true });
+  for (const [name, body] of Object.entries(files)) {
+    fs.writeFileSync(path.join(root, 'policy', name), typeof body === 'string' ? body : JSON.stringify(body, null, 2));
+  }
+  const rows = [];
+  const e = new PolicyEngine(root, (r) => rows.push(r), () => [], workspaces ?? (() => []));
+  e.load();
+  return { e, rows, root };
+}
+
+const PACK = () => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'examples/policy/engine.example.json'), 'utf8'));
+
+test('21a. a hook-schema authority.json alone loads 0 rules and says why in plain words', () => {
+  const { e, rows } = hiveWith({ 'authority.json': HOOK_SCHEMA });
+  assert.equal(e.ruleCount, 0);
+  assert.equal(e.active, true, 'self-protection stays armed: a policy file exists');
+  assert.match(e.error, /guardrail-hook schema/);
+  assert.match(e.error, /engine\.json/);
+  const fail = rows.find((r) => r.kind === 'policy-load-failed');
+  assert.ok(fail, 'the failure is a row, not silence');
+  assert.equal(fail.rules_loaded, 0);
+  assert.doesNotMatch(e.error, /unknown matcher/, 'the old message named a symptom, not the fix');
+  const st = e.status;
+  assert.deepEqual([st.configured, st.rulesLoaded, st.loadedAt], [true, 0, null]);
+  assert.ok(st.file.endsWith('authority.json'));
+});
+
+test('21b. engine.json beside the hook file loads, and authority.json is never written', () => {
+  const pack = PACK();
+  const { e, rows, root } = hiveWith({ 'authority.json': HOOK_SCHEMA, 'engine.json': pack });
+  const before = fs.readFileSync(path.join(root, 'policy', 'authority.json'), 'utf8');
+  assert.equal(e.error, null);
+  assert.equal(e.ruleCount, 4);
+  const st = e.status;
+  assert.ok(st.file.endsWith('engine.json'));
+  assert.deepEqual(st.ruleIds, ['cross-agent-write', 'cross-agent-workspace', 'destructive-shared-state', 'remote-push']);
+  assert.ok(st.loadedAt);
+  const loaded = rows.find((r) => r.kind === 'policy-loaded');
+  assert.equal(loaded.rules_loaded, 4);
+  assert.equal(rows.filter((r) => r.kind === 'policy-load-failed').length, 0);
+  assert.equal(fs.readFileSync(path.join(root, 'policy', 'authority.json'), 'utf8'), before);
+});
+
+test('21c. every rule in the shipped pack is dry_run', () => {
+  for (const r of PACK().rules) assert.equal(r.mode, 'dry_run', r.id);
+});
+
+test('21d. an engine-schema authority.json with no engine.json still loads (pre-md-216 installs)', () => {
+  const { e } = hiveWith({ 'authority.json': PACK() });
+  assert.equal(e.error, null);
+  assert.equal(e.ruleCount, 4);
+});
+
+test('21e. with engine.json present, a broken engine.json fails even if authority.json is fine', () => {
+  const { e } = hiveWith({ 'authority.json': PACK(), 'engine.json': '{ not json' });
+  assert.equal(e.ruleCount, 0);
+  assert.ok(e.error);
+  assert.ok(e.status.file.endsWith('engine.json'), 'the file that failed is the one reported');
+});
+
+test('21f. isHookSchema: match.kind or an upper-case mode, and nothing else', () => {
+  assert.equal(isHookSchema(HOOK_SCHEMA), true);
+  assert.equal(isHookSchema({ rules: [{ id: 'x', mode: 'LIVE', match: { tool: 'Bash' } }] }), true);
+  assert.equal(isHookSchema(PACK()), false);
+  assert.equal(isHookSchema({}), false);
+});
+
+test('21g. the live hook-schema file stays loadable by the shell hook it belongs to', () => {
+  // The hook throws on an unknown kind; guard that the engine-only matcher never
+  // leaked into the hook's schema by accident.
+  for (const r of HOOK_SCHEMA.rules) assert.ok(['cross_agent_write', 'bash_regex'].includes(r.match.kind));
+});
+
+// --- 22. md-216: writes and deletes into another agent's workspace -----------------
+
+function tmpTree() {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'md216-ws-')));
+  const mk = (...p) => { const d = path.join(base, ...p); fs.mkdirSync(d, { recursive: true }); return d; };
+  return {
+    base,
+    shared: mk('portfolio'),                         // every agent's registered cwd
+    wtB: mk('portfolio', 'b-worktree'),               // agent-b's registered worktree
+    harness: mk('Harness'),                           // god's cwd, contains the hive
+    hiveA: mk('Harness', 'hive', 'agents', 'agent-a'),
+    hiveB: mk('Harness', 'hive', 'agents', 'agent-b'),
+    wtC: mk('Harness', 'worktrees', 'worker-c'),     // an isolated worker worktree
+  };
+}
+
+function workspaceEngine(t) {
+  const ws = () => [
+    { agentId: 'god', roots: [t.harness, path.join(t.harness, 'hive', 'agents', 'god')] },
+    { agentId: 'agent-a', roots: [t.shared, t.hiveA] },
+    { agentId: 'agent-b', roots: [t.wtB, t.hiveB] },
+    { agentId: 'worker-c', roots: [t.shared, path.join(t.harness, 'hive', 'agents', 'worker-c'), t.wtC] },
+  ];
+  const rule = PACK().rules.find((r) => r.id === 'cross-agent-workspace');
+  return hiveWith({ 'engine.json': { version: 1, rules: [rule] } }, ws).e;
+}
+
+const bashIn = (cwd, command, agent) => ({ ...pre('Bash', { command }, agent), cwd });
+
+test('22a. ownedRoots: a shared cwd is nobody\'s, a container is nobody\'s, a worktree is its owner\'s', () => {
+  const t = tmpTree();
+  const roots = ownedRoots([
+    { agentId: 'god', roots: [t.harness] },
+    { agentId: 'agent-a', roots: [t.shared, t.hiveA] },
+    { agentId: 'agent-b', roots: [t.wtB] },
+    { agentId: 'worker-c', roots: [t.shared, t.wtC] },
+  ]);
+  const map = Object.fromEntries(roots.map((r) => [r.root, r.agentId]));
+  assert.equal(map[t.shared], undefined, 'registered by two agents');
+  assert.equal(map[t.harness], undefined, 'contains other agents\' roots');
+  assert.equal(map[t.wtB], 'agent-b');
+  assert.equal(map[t.wtC], 'worker-c');
+  assert.equal(map[t.hiveA], 'agent-a');
+});
+
+test('22b. rm -rf inside another agent\'s worktree would be denied (dry_run: logged, allowed)', () => {
+  const t = tmpTree();
+  const e = workspaceEngine(t);
+  for (const cmd of [
+    `rm -rf ${t.wtB}/src`,
+    `rm -rf ${t.wtB}`,
+    `cd ${t.wtB} && rm -rf src tests`,
+    `find ${t.wtB} -name '*.ts' -delete`,
+    `mv ${t.wtB}/package.json /tmp/`,
+    `echo x > ${t.wtC}/notes.md`,
+  ]) {
+    const v = e.evaluate(bashIn(t.shared, cmd, 'agent-a'));
+    assert.equal(v.decision, 'allow', `dry_run must not block: ${cmd}`);
+    assert.equal(v.wouldDeny, true, `should be flagged: ${cmd}`);
+    assert.equal(v.ruleId, 'cross-agent-workspace');
+    assert.equal(v.matchedOn, 'path_in_other_agent_workspace');
+  }
+});
+
+test('22c. relative paths resolve against the agent\'s cwd', () => {
+  const t = tmpTree();
+  const e = workspaceEngine(t);
+  assert.equal(e.evaluate(bashIn(t.shared, 'rm -rf b-worktree/src', 'agent-a')).wouldDeny, true);
+  assert.equal(e.evaluate(bashIn(t.wtB, 'rm -rf ./src', 'agent-a')).wouldDeny, true);
+});
+
+test('22d. Write/Edit on a tracked file in another agent\'s worktree is caught too', () => {
+  const t = tmpTree();
+  const e = workspaceEngine(t);
+  assert.equal(e.evaluate(pre('Write', { file_path: path.join(t.wtB, 'src', 'a.ts') }, 'agent-a')).wouldDeny, true);
+  assert.equal(e.evaluate(pre('Edit', { file_path: path.join(t.wtC, 'x.md') }, 'agent-b')).wouldDeny, true);
+});
+
+test('22e. no false alarms: own worktree, shared cwd, hive root, reads, unknown agent', () => {
+  const t = tmpTree();
+  const e = workspaceEngine(t);
+  const quiet = (p, why) => {
+    const v = e.evaluate(p);
+    assert.equal(v.decision, 'allow', why);
+    assert.notEqual(v.wouldDeny, true, why);
+  };
+  quiet(bashIn(t.wtB, 'rm -rf src && echo x > a.md', 'agent-b'), 'own worktree');
+  quiet(bashIn(t.shared, 'rm -rf node_modules dist', 'agent-a'), 'shared cwd is nobody\'s');
+  quiet(bashIn(t.shared, `rm -rf ${t.shared}/some-other-repo`, 'agent-b'), 'unregistered checkout under the shared cwd');
+  quiet(bashIn(t.harness, `echo x >> ${path.join(t.harness, 'hive', 'board.md')}`, 'agent-a'), 'the hive is shared, not god\'s');
+  quiet(bashIn(t.shared, `cat ${t.wtB}/src/a.ts; grep -rn x ${t.wtB}; ls ${t.wtC}`, 'agent-a'), 'reading another worktree is fine');
+  quiet({ hook_event_name: 'PreToolUse', agent_id: null, tool_name: 'Bash', tool_input: { command: `rm -rf ${t.wtB}/src` }, cwd: t.shared },
+    'no agent id: nothing is "other"');
+});
+
+test('22f. god removing a LIVE worker\'s worktree is flagged; archiving first is how cleanup stays quiet', () => {
+  const t = tmpTree();
+  const e = workspaceEngine(t);
+  // Archived agents are dropped by HookServer.agentWorkspaces before the engine sees
+  // them, so this only fires while worker-c is still registered and live.
+  assert.equal(e.evaluate(bashIn(t.harness, `rm -rf ${t.wtC}`, 'god')).wouldDeny, true);
+});
+
+test('22g. the matcher must be literally true', () => {
+  const bad = { id: 'x', decision: 'deny', reason: 'r', match: { path_in_other_agent_workspace: 'yes' } };
+  const { e } = hiveWith({ 'engine.json': { rules: [bad] } });
+  assert.equal(e.ruleCount, 0);
+  assert.match(e.error, /must be true/);
 });
