@@ -182,6 +182,15 @@ export interface HarnessConfig {
   audience?: 'technical' | 'non-technical';
   /** Folder where the harness keeps its own state (agent metadata, logs). */
   harnessHome: string | null;
+  /** Config-file only, no UI (md-223). Directories under `harnessHome` whose
+   *  per-agent children the guardrail treats as that agent's workspace: every LIVE
+   *  agent owns `<harnessHome>/<root>/<its-id>/**` for each root listed here.
+   *  Unset means `['worktrees', 'code-worktrees']`; an explicit `[]` opts out. Roots
+   *  must be relative, non-empty and free of `..` — anything else is dropped and
+   *  named in the `policy-status` row at startup, never an error. Deliberately NOT in
+   *  DEFAULTS: persistConfig would then freeze today's default into every config.json
+   *  on its next save, and a later change to the default would never reach them. */
+  workspaceRoots?: string[];
   /** Recently-opened hive home folders (most-recent first), surfaced by the
    *  launch-time hive picker. Maintained by writeConfig whenever harnessHome is
    *  set (onboarding finish, changeHome). Capped to a handful. */

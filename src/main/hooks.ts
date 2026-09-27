@@ -12,7 +12,7 @@
  */
 import { createServer, type Server } from 'node:net';
 import { existsSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, normalize } from 'node:path';
 import { Notification, type WebContents } from 'electron';
 import type { HiveManager } from './hive';
 import type { HarnessConfig } from './config';
@@ -49,6 +49,55 @@ interface HookPayload {
   output?: number;
   cache_read?: number;
   cache_creation?: number;
+}
+
+/**
+ * md-223: the directories under harnessHome whose per-agent children count as that
+ * agent's workspace, when `workspaceRoots` is not set. `worktrees` is where the
+ * harness puts an isolated agent (it was the one hardcoded root before this);
+ * `code-worktrees` is where the day-job floor keeps most checkouts (md-220).
+ */
+export const DEFAULT_WORKSPACE_ROOTS: readonly string[] = ['worktrees', 'code-worktrees'];
+
+/**
+ * Clean `workspaceRoots` from a hand-edited config file. Pure, so it runs wherever
+ * the roots are joined AND once at startup to report what it dropped.
+ *
+ * Every root is joined as `<harnessHome>/<root>/<agent-id>`, so a root is only safe if
+ * it stays inside harnessHome and is not harnessHome itself: relative, non-empty, no
+ * `..` segment (checked on the raw text, because normalize would quietly fold
+ * `a/../b` into `b` and hide it), and not `.`. A bad entry is dropped and named, never
+ * an error — the guardrail's bias is that an attribution failure costs protection,
+ * not work, so the worst a typo can do here is own less.
+ *
+ * Unset means the default. Anything that is not a list is a hand-edit mistake, and
+ * falling back to the default keeps `worktrees` protected, as it was before md-223,
+ * instead of silently protecting nothing. An explicit `[]` is honoured as an opt-out.
+ */
+export function sanitizeWorkspaceRoots(raw: unknown): {
+  roots: string[];
+  rejected: Array<{ root: unknown; why: string }>;
+} {
+  if (raw === undefined || raw === null) return { roots: [...DEFAULT_WORKSPACE_ROOTS], rejected: [] };
+  if (!Array.isArray(raw)) {
+    return { roots: [...DEFAULT_WORKSPACE_ROOTS], rejected: [{ root: raw, why: 'not a list; using the default' }] };
+  }
+  const roots: string[] = [];
+  const rejected: Array<{ root: unknown; why: string }> = [];
+  for (const r of raw) {
+    if (typeof r !== 'string') { rejected.push({ root: r, why: 'not a string' }); continue; }
+    const t = r.trim();
+    if (!t) { rejected.push({ root: r, why: 'empty' }); continue; }
+    if (isAbsolute(t) || /^[a-zA-Z]:/.test(t) || t.startsWith('\\')) {
+      rejected.push({ root: r, why: 'absolute; roots are relative to harnessHome' });
+      continue;
+    }
+    if (t.split(/[\\/]+/).includes('..')) { rejected.push({ root: r, why: "contains '..'" }); continue; }
+    const n = normalize(t).replace(/[\\/]+$/, '');
+    if (!n || n === '.') { rejected.push({ root: r, why: 'resolves to harnessHome itself' }); continue; }
+    if (!roots.includes(n)) roots.push(n);
+  }
+  return { roots, rejected };
 }
 
 export class HookServer {
@@ -171,13 +220,21 @@ export class HookServer {
       return;
     }
     if (!status.configured) return; // unconfigured → inert, and quiet about it
+    // md-223: which workspace roots are live, and what a hand edit got dropped. Here
+    // rather than at every read, so a bad entry is named once per start, not per call.
+    const ws = sanitizeWorkspaceRoots(this.getConfig().workspaceRoots);
     this.hive.appendLog({
       kind: 'policy-status',
       rules_loaded: status.rulesLoaded,
       rule_ids: status.ruleIds,
       file: status.file,
       error: status.error,
+      workspace_roots: ws.roots,
+      workspace_roots_rejected: ws.rejected,
     } as Parameters<HiveManager['appendLog']>[0]);
+    if (ws.rejected.length) {
+      console.warn(`[policy] workspaceRoots: dropped ${ws.rejected.map((r) => `${JSON.stringify(r.root)} (${r.why})`).join(', ')}`);
+    }
     // Configured with zero rules is a failure whether or not an error string came with
     // it (md-217 N1): "enforcing nothing" is exactly the condition this exists to shout.
     const failed = status.error ?? (status.rulesLoaded === 0 ? 'policy configured but 0 rules loaded' : null);
@@ -211,13 +268,19 @@ export class HookServer {
   private agentWorkspaces(): AgentWorkspace[] {
     const root = this.hive.root();
     if (!root) return [];
-    const home = this.getConfig().harnessHome;
+    const cfg = this.getConfig();
+    const home = cfg.harnessHome;
+    // md-223: joined per LIVE registry agent, never discovered from disk — so a
+    // directory under a root that is named for anyone else (an unknown id, an archived
+    // agent's leftovers) is simply never considered, and belongs to nobody.
+    const { roots: wsRoots } = sanitizeWorkspaceRoots(cfg.workspaceRoots);
     const reg = this.hive.registry();
     return Object.entries(reg.agents)
       .filter(([, a]) => !a.archived)
       .map(([id, a]) => ({
         agentId: id,
-        roots: [a.cwd, join(root, 'agents', id), home ? join(home, 'worktrees', id) : ''].filter(Boolean) as string[],
+        roots: [a.cwd, join(root, 'agents', id), ...(home ? wsRoots.map((r) => join(home, r, id)) : [])]
+          .filter(Boolean) as string[],
       }));
   }
 
