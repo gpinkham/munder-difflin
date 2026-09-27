@@ -1206,6 +1206,8 @@ test('21a. a hook-schema authority.json alone loads 0 rules and says why in plai
   assert.equal(e.active, true, 'self-protection stays armed: a policy file exists');
   assert.match(e.error, /guardrail-hook schema/);
   assert.match(e.error, /engine\.json/);
+  assert.match(e.error, /examples\/policy\/engine\.example\.json/, 'the fix it names must be a file that exists');
+  assert.ok(fs.existsSync(path.join(__dirname, '..', 'examples/policy/engine.example.json')));
   const fail = rows.find((r) => r.kind === 'policy-load-failed');
   assert.ok(fail, 'the failure is a row, not silence');
   assert.equal(fail.rules_loaded, 0);

@@ -402,7 +402,7 @@ export class PolicyEngine {
       // instead of "unknown matcher" three times.
       this.fail(
         `${LEGACY_POLICY_FILE} is the guardrail-hook schema (match.kind), which this engine does not read; `
-        + `add ${ENGINE_POLICY_FILE} beside it (see examples/policy/${ENGINE_POLICY_FILE}). 0 engine rules loaded.`
+        + `add ${ENGINE_POLICY_FILE} beside it (copy examples/policy/engine.example.json). 0 engine rules loaded.`
       );
       return;
     }
