@@ -90,3 +90,15 @@ test('agentWorkspaces: cwd, hive folder and harness worktree for live agents onl
   assert.deepEqual(jim.roots, [path.join(home, 'repo'), path.join(hive.root(), 'agents', 'jim-1'), path.join(home, 'worktrees', 'jim-1')]);
   assert.equal(ws.find((w) => w.agentId === 'old-1'), undefined, 'archived agents own nothing');
 });
+
+test('N1: an engine.json that parses but names no rules is a failure god hears about', async (t) => {
+  for (const body of [{}, { rules: [] }, { rules: {} }]) {
+    const { server, logRows, godInbox } = await floor(t, { 'engine.json': body });
+    server.announcePolicy();
+    const status = logRows().find((r) => r.kind === 'policy-status');
+    assert.equal(status.rules_loaded, 0, JSON.stringify(body));
+    assert.ok(status.error, `${JSON.stringify(body)}: error must be set`);
+    assert.equal(godInbox().filter((m) => /Guardrail policy failed to load/.test(m.subject)).length, 1, JSON.stringify(body));
+    assert.equal(server.policyStatus().error, status.error, 'fleet.json and the log say the same thing');
+  }
+});

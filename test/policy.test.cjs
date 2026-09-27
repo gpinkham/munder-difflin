@@ -1372,3 +1372,82 @@ test('22g. the matcher must be literally true', () => {
   assert.equal(e.ruleCount, 0);
   assert.match(e.error, /must be true/);
 });
+
+// --- 23. md-217 review: N1 no silent zero, N2 containers, N5 nesting -------------
+
+test('23a. N1: every malformed shape fails loudly instead of loading a quiet zero', () => {
+  for (const body of ['null', '[]', '"x"', '{}', '{"rules":[]}', '{"rules":{}}', '{"rules":"x"}', '{"rules":[null]}', '{', '']) {
+    for (const file of ['engine.json', 'authority.json']) {
+      const { e, rows } = hiveWith({ [file]: body });
+      assert.equal(e.ruleCount, 0, `${file} ${body}`);
+      assert.ok(e.error, `${file} ${body}: must carry an error`);
+      assert.equal(e.active, true, 'self-protection stays armed');
+      assert.ok(rows.some((r) => r.kind === 'policy-load-failed'), `${file} ${body}: must log`);
+      assert.equal(rows.some((r) => r.kind === 'policy-loaded'), false);
+    }
+  }
+});
+
+test('23b. N2: a trailing /** also matches the directory itself', () => {
+  assert.equal(globToRegExp('**/hive/agents/*/**').test('/h/hive/agents/kelly'), true);
+  assert.equal(globToRegExp('**/hive/agents/*/**').test('/h/hive/agents/kelly/x'), true);
+  assert.equal(globToRegExp('**/hive/agents/*/**').test('/h/hive/agents'), false);
+  assert.equal(globToRegExp('/a/**').test('/a'), true);
+  assert.equal(globToRegExp('/a/**').test('/ab'), false, 'a sibling that shares a prefix is not the directory');
+});
+
+/** A real on-disk hive so globContains has something to read. */
+function diskHive() {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'md217-hive-')));
+  for (const id of ['agent-a', 'kelly']) fs.mkdirSync(path.join(base, 'hive', 'agents', id, 'inbox'), { recursive: true });
+  fs.mkdirSync(path.join(base, 'build', 'out'), { recursive: true });
+  return base;
+}
+
+test('23c. N2: cross-agent-write catches removing a folder, or a container of folders', () => {
+  const base = diskHive();
+  const rule = { ...PACK().rules.find((r) => r.id === 'cross-agent-write'), mode: 'live' };
+  const { e } = hiveWith({ 'engine.json': { rules: [rule] } });
+  const run = (command, agent = 'agent-a', cwd = base) => e.evaluate({ ...pre('Bash', { command }, agent), cwd }).decision;
+  assert.equal(run(`rm -rf ${base}/hive/agents/kelly`), 'deny', 'the folder itself, no trailing slash');
+  assert.equal(run(`mv ${base}/hive/agents/kelly /tmp/k`), 'deny');
+  assert.equal(run(`rm -rf ${base}/hive/agents`), 'deny', 'every agent folder at once');
+  assert.equal(run(`rm -rf ${base}/hive`), 'deny');
+  assert.equal(run('rm -rf hive/agents', 'agent-a', base), 'deny', 'relative');
+  assert.equal(run(`rm -rf ${base}/hive/agents/agent-a`), 'allow', 'your own folder');
+  assert.equal(run(`rm -rf ${base}/build`), 'allow', 'no agent folder under it on disk');
+  assert.equal(run(`cp notes.md ${base}/hive/`), 'allow', 'writing INTO the hive root destroys nothing');
+  assert.equal(run(`cat ${base}/hive/agents/kelly/memory.md`), 'allow');
+});
+
+test('23d. N2: the workspace rule catches removing a directory that holds another workspace', () => {
+  const t = tmpTree();
+  const e = workspaceEngine(t);
+  const flagged = (cwd, cmd, agent = 'agent-a') => e.evaluate(bashIn(cwd, cmd, agent)).wouldDeny === true;
+  assert.equal(flagged(t.shared, `rm -rf ${t.harness}/worktrees`), true, 'every worker worktree');
+  assert.equal(flagged(t.wtC, 'rm -rf ..', 'worker-c'), false, 'only its own worktree is under ../ here');
+  fs.mkdirSync(path.join(t.harness, 'worktrees', 'agent-a'), { recursive: true });
+  const e2 = hiveWith({ 'engine.json': { version: 1, rules: [PACK().rules.find((r) => r.id === 'cross-agent-workspace')] } }, () => [
+    { agentId: 'agent-a', roots: [t.shared, path.join(t.harness, 'worktrees', 'agent-a')] },
+    { agentId: 'worker-c', roots: [t.shared, t.wtC] },
+  ]).e;
+  assert.equal(e2.evaluate(bashIn(path.join(t.harness, 'worktrees', 'agent-a'), 'rm -rf ..', 'agent-a')).wouldDeny, true,
+    'rm -rf .. from your own worktree takes the siblings with it');
+  assert.equal(flagged(t.shared, `mv ${t.harness}/worktrees /tmp/gone`), true);
+  assert.equal(flagged(t.shared, `cp x.md ${t.harness}/worktrees/`), false, 'copying INTO a container is not removing it');
+  assert.equal(flagged(t.shared, `rm -rf ${t.shared}/node_modules`), false);
+});
+
+test('23e. N5: nested cwds — the most specific root owns; the outer agent is flagged under it (documented)', () => {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'md217-mono-')));
+  fs.mkdirSync(path.join(base, 'repo', 'pkg'), { recursive: true });
+  const rule = PACK().rules.find((r) => r.id === 'cross-agent-workspace');
+  const { e } = hiveWith({ 'engine.json': { rules: [rule] } }, () => [
+    { agentId: 'mono', roots: [path.join(base, 'repo')] },
+    { agentId: 'pkg', roots: [path.join(base, 'repo', 'pkg')] },
+  ]);
+  const v = (cmd, agent) => e.evaluate(bashIn(path.join(base, 'repo'), cmd, agent));
+  assert.equal(v('rm -rf pkg/dist', 'mono').wouldDeny, true, 'accepted dry_run cost: the outer agent writing into the inner root');
+  assert.notEqual(v('rm -rf dist', 'mono').wouldDeny, true, 'the outer root itself is nobody\'s');
+  assert.notEqual(v('rm -rf pkg/dist', 'pkg').wouldDeny, true);
+});

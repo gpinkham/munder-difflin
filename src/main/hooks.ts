@@ -178,15 +178,18 @@ export class HookServer {
       file: status.file,
       error: status.error,
     } as Parameters<HiveManager['appendLog']>[0]);
-    console.log(`[policy] rules loaded: ${status.rulesLoaded} (${status.file})${status.error ? ` FAILED: ${status.error}` : ''}`);
-    if (status.error) {
+    // Configured with zero rules is a failure whether or not an error string came with
+    // it (md-217 N1): "enforcing nothing" is exactly the condition this exists to shout.
+    const failed = status.error ?? (status.rulesLoaded === 0 ? 'policy configured but 0 rules loaded' : null);
+    console.log(`[policy] rules loaded: ${status.rulesLoaded} (${status.file})${failed ? ` FAILED: ${failed}` : ''}`);
+    if (failed) {
       try {
         this.hive.send({
           to: 'god',
           act: 'inform',
           subject: 'Guardrail policy failed to load: 0 rules enforced',
           body: `The in-app guardrail found a policy at ${status.file} but loaded NO rules, so nothing is being checked `
-            + `(policy self-protection is still on). Reason: ${status.error}\n`
+            + `(policy self-protection is still on). Reason: ${failed}\n`
             + 'Fix the file and restart the app; fleet.json "policy" shows the current status.',
           requires_reply: false,
         }, 'guardrail');

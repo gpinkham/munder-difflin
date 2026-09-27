@@ -41,7 +41,7 @@
  *
  * Runs in the Electron main process, called from HookServer.handle().
  */
-import { readFileSync, existsSync, appendFileSync } from 'node:fs';
+import { readFileSync, existsSync, appendFileSync, readdirSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import {
@@ -65,6 +65,9 @@ const MATCHERS = [
   'command_not_matches',
   'path_in_other_agent_workspace',
 ] as const;
+
+/** Verbs whose written targets are removed wholesale, as opposed to written into. */
+const DESTROY_VERBS = new Set(['rm', 'rmdir', 'unlink', 'shred', 'find', 'mv']);
 
 /**
  * The engine's own policy file, and the one it falls back to.
@@ -285,7 +288,13 @@ export function globToRegExp(glob: string): RegExp {
       if (glob[i + 1] === '*') {
         // `**/` should also match zero directories, so `**/a` matches `/a`.
         if (glob[i + 2] === '/') { out += '(?:.*/)?'; i += 2; }
-        else { out += '.*'; i += 1; }
+        else if (i === glob.length - 2 && out.endsWith('/')) {
+          // A trailing `/**` also matches the directory ITSELF (md-217 N2): the rule
+          // "nothing under agents/<x>/" has to include `rm -rf agents/<x>`, which removes
+          // everything under it and names no path inside it.
+          out = out.slice(0, -1) + '(?:/.*)?';
+          i += 1;
+        } else { out += '.*'; i += 1; }
       } else {
         out += '[^/]*';
       }
@@ -396,6 +405,29 @@ export class PolicyEngine {
       return;
     }
 
+    try {
+      this.loadParsed(parsed, hasEngine);
+    } catch (e) {
+      // md-217 N1: a file that parses but has the wrong shape threw here and left
+      // `configured: true, error: null` behind, which reads as healthy. Nothing that
+      // happens past the parse may leave the engine silently enforcing nothing.
+      this.rules = [];
+      this.loadedAt = null;
+      this.fail(`policy file could not be read as rules: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /** Everything after the JSON parse. Split out so `load` can guarantee that a throw
+   *  becomes a logged failure instead of a quiet zero. */
+  private loadParsed(parsed: PolicyFile, hasEngine: boolean): void {
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      this.fail(`policy file must be a JSON object with a "rules" array, got ${parsed === null ? 'null' : Array.isArray(parsed) ? 'an array' : typeof parsed}`);
+      return;
+    }
+    if (parsed.rules !== undefined && !Array.isArray(parsed.rules)) {
+      this.fail(`"rules" must be an array, got ${parsed.rules === null ? 'null' : typeof parsed.rules}`);
+      return;
+    }
     if (!hasEngine && isHookSchema(parsed)) {
       // The one layout that silently enforced nothing for as long as it was installed:
       // only the shell hook's file is present. Say so in words an operator can act on,
@@ -417,6 +449,14 @@ export class PolicyEngine {
     if (invalid.length) {
       this.fail(invalid.map((i) => `${i.id}: ${i.why}`).join('; '), invalid);
       return; // all-or-nothing: a policy you cannot fully trust is not loaded
+    }
+    if (!rules.length) {
+      // A policy file that exists but names no rules is a truncated write or a bad
+      // hand edit far more often than a deliberate choice, and it enforces nothing.
+      // Self-protection stays armed; the status says so loudly. (To turn the engine
+      // off, remove the file, or touch nothing and set every rule to dry_run.)
+      this.fail('policy file has no rules: nothing is enforced');
+      return;
     }
 
     if (parsed.defaults?.mode) this.defaults.mode = parsed.defaults.mode;
@@ -578,6 +618,24 @@ export class PolicyEngine {
     return out;
   }
 
+  /**
+   * The paths this payload REMOVES wholesale, normalised with no trailing slash: the
+   * targets of a deleting verb (rm, rmdir, unlink, shred, a deleting find, xargs rm)
+   * and the sources a verb takes away (mv). Only these can "contain" another agent's
+   * workspace — `cp report.md <hive>/` writes INTO a directory and leaves its contents
+   * alone, so it must not count as destroying everything under it.
+   */
+  private destroyPaths(p: PolicyPayload, ctx: EvalContext): string[] {
+    if (p.tool_name !== 'Bash') return [];
+    const out: string[] = [];
+    for (const c of this.commands(p, ctx)) {
+      const verb = (c.argv[0] ?? '').split('/').pop() ?? '';
+      const targets = [...c.removes, ...(DESTROY_VERBS.has(verb) ? c.verbWrites : [])];
+      for (const t of targets) out.push(normalisePath(t, p.cwd).replace(/\/+$/, '') || '/');
+    }
+    return out;
+  }
+
   /** shell.ts output for this payload, parsed once per evaluation and reused by
    *  every rule — parsing is the only non-trivial cost in front of a tool call. */
   private commands(p: PolicyPayload, ctx: EvalContext): EffectiveCommand[] {
@@ -727,7 +785,12 @@ export class PolicyEngine {
         const pattern = interpolate(m.path_glob, p.agent_id);
         if (pattern === null) return null; // unresolved ${AGENT_ID} must not match
         const re = globToRegExp(pattern);
-        if (!eligible.some((x) => re.test(x))) return null;
+        // A removal of a directory that CONTAINS matching paths counts too: `rm -rf
+        // hive/agents` names no path inside any agent folder and empties all of them.
+        const destroyed = new Set(this.destroyPaths(p, ctx));
+        const hit = eligible.some((x) => re.test(x)
+          || (destroyed.has(x) && globContains(x, pattern, negative)));
+        if (!hit) return null;
         matchedOn = 'path_glob';
       }
     }
@@ -741,6 +804,12 @@ export class PolicyEngine {
       const foreign = paths.some((x) => {
         const owner = ownerOf(x, roots);
         return owner !== null && owner !== p.agent_id;
+      }) || this.destroyPaths(p, ctx).some((x) => {
+        // md-217 N2: removing a directory that CONTAINS someone else's workspace —
+        // `rm -rf <home>/worktrees`, `rm -rf ..` from inside your own worktree — takes
+        // theirs with it, and names no path inside it.
+        const prefix = x === '/' ? '/' : x + '/';
+        return roots.some((r) => r.agentId !== p.agent_id && r.root.startsWith(prefix));
       });
       if (!foreign) return null;
       matchedOn = 'path_in_other_agent_workspace';
@@ -928,6 +997,43 @@ export function ownedRoots(workspaces: AgentWorkspace[]): Array<{ agentId: strin
     out.push({ agentId, root });
   }
   return out;
+}
+
+/**
+ * Does the existing directory `dir` contain a path that `glob` matches and `negative`
+ * does not? Grounded in the disk, not in the pattern: `rm -rf /tmp/build` must not
+ * fire because a `hive/agents/x/y` COULD be created under it, only because one IS there.
+ *
+ * The glob is split at each segment boundary; where the head of the pattern matches
+ * `dir` itself, the tail is walked into the real directory (a literal segment must
+ * exist, a wildcard segment reads the entries, `**` stands for anything below). Bounded
+ * by entry count and depth, and any fs error just means "not shown to contain".
+ */
+export function globContains(dir: string, glob: string, negative: RegExp | null): boolean {
+  const full = globToRegExp(glob);
+  const segs = glob.split('/');
+  const probe = (d: string) => {
+    const leaf = d.replace(/\/+$/, '') + '/\u0001';
+    return full.test(leaf) && !(negative && negative.test(leaf));
+  };
+  const isDir = (d: string) => { try { return statSync(d).isDirectory(); } catch { return false; } };
+  const walk = (d: string, rest: string[], depth: number): boolean => {
+    if (depth > 8 || !isDir(d)) return false;
+    if (!rest.length || rest[0] === '**') return probe(d);
+    const [seg, ...tail] = rest;
+    if (!/[*?]/.test(seg)) return walk(join(d, seg), tail, depth + 1);
+    const re = globToRegExp(seg);
+    let names: string[] = [];
+    try { names = readdirSync(d).slice(0, 500); } catch { return false; }
+    return names.some((n) => re.test(n) && walk(join(d, n), tail, depth + 1));
+  };
+  for (let k = segs.length - 2; k >= 0; k--) {
+    const head = segs.slice(0, k + 1).join('/');
+    if (!head || head === '**') continue;
+    if (!globToRegExp(head).test(dir)) continue;
+    if (walk(dir, segs.slice(k + 1), 0)) return true;
+  }
+  return false;
 }
 
 /** The agent whose owned root holds this absolute path, or null. Deepest root wins. */
