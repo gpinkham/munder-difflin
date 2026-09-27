@@ -215,6 +215,13 @@ test('md-223: sanitizeWorkspaceRoots — default, trim, dedupe, and a reason for
 
   // Not a list at all is a hand-edit mistake: keep the long-standing protection
   // (worktrees/ was hardcoded before this) and say so, rather than drop to nothing.
+  // N2: '~' is not expanded here, so '~/code-worktrees' would own a literal "~" dir
+  // (the #140 trap) and silently protect nothing. Refused, and named.
+  const tilde = sanitizeWorkspaceRoots(['~/code-worktrees', '~', 'ok~']);
+  assert.deepEqual(tilde.roots, ['ok~'], 'only a LEADING ~ is the trap');
+  assert.deepEqual(tilde.rejected.map((r) => r.root), ['~/code-worktrees', '~']);
+  for (const r of tilde.rejected) assert.match(r.why, /~/);
+
   const typo = sanitizeWorkspaceRoots('code-worktrees');
   assert.deepEqual(typo.roots, ['worktrees', 'code-worktrees']);
   assert.equal(typo.rejected.length, 1);
@@ -228,3 +235,35 @@ test('md-223: the startup status row says which roots are live and which were dr
   assert.deepEqual(status.workspace_roots_rejected.map((r) => r.root), ['..', '']);
   assert.equal(status.rules_loaded, 4, 'a bad root never blocks the policy from loading');
 });
+
+test('md-223 N1: a forged registry id cannot steal a colleague\'s checkout or own outside the harness',
+  async (t) => {
+    // The id is the one false-DENY channel in this feature: it is joined as a path
+    // segment, so a hand-edited registry.json can aim it anywhere. Dwight's probe I.
+    const { hive, home, cw, asJim, server } = await dayJobFloor(t);
+    const regPath = path.join(hive.root(), 'registry.json');
+    const reg = JSON.parse(fs.readFileSync(regPath, 'utf8'));
+    const elsewhere = path.join(home, 'elsewhere');
+    for (const id of ['../code-worktrees/ryan-1/portal', '../../../etc']) {
+      reg.agents[id] = { id, name: 'Forged', provider: 'claude', cwd: elsewhere, status: 'idle', lastSeen: 0 };
+    }
+    fs.writeFileSync(regPath, JSON.stringify(reg));
+    fs.mkdirSync(cw('ryan-1', 'portalclient'), { recursive: true });
+
+    // Direction 1 — false DENY: ryan working in his own checkout must not be flagged.
+    const ryan = server.policyEngine().evaluate({
+      hook_event_name: 'PreToolUse', agent_id: 'ryan-1', tool_name: 'Bash',
+      tool_input: { command: `rm -rf ${cw('ryan-1', 'portal')}` }, cwd: path.join(home, 'repo'),
+    });
+    assert.equal(ryan.ruleId, undefined, "ryan's own checkout must stay his");
+
+    // Direction 2 — false ALLOW: ryan's root must survive, so the REST of his checkout
+    // is still protected from jim.
+    assert.equal(asJim(`rm -rf ${cw('ryan-1', 'portalclient')}`).ruleId, 'cross-agent-workspace',
+      "a forged id must not knock ryan's root out of ownedRoots");
+
+    // And a forged id gets no id-derived root at all — only the cwd it registered.
+    for (const w of server.agentWorkspaces().filter((x) => x.agentId.includes('..'))) {
+      assert.deepEqual(w.roots, [elsewhere], `${w.agentId} must not join into a path`);
+    }
+  });

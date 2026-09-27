@@ -88,6 +88,9 @@ export function sanitizeWorkspaceRoots(raw: unknown): {
     if (typeof r !== 'string') { rejected.push({ root: r, why: 'not a string' }); continue; }
     const t = r.trim();
     if (!t) { rejected.push({ root: r, why: 'empty' }); continue; }
+    // N2: '~' is not expanded here, so '~/x' would own a literal directory named "~"
+    // and silently protect nothing — the trap this repo already paid for in #140.
+    if (t.startsWith('~')) { rejected.push({ root: r, why: "'~' is not expanded; give a path relative to harnessHome" }); continue; }
     if (isAbsolute(t) || /^[a-zA-Z]:/.test(t) || t.startsWith('\\')) {
       rejected.push({ root: r, why: 'absolute; roots are relative to harnessHome' });
       continue;
@@ -277,11 +280,18 @@ export class HookServer {
     const reg = this.hive.registry();
     return Object.entries(reg.agents)
       .filter(([, a]) => !a.archived)
-      .map(([id, a]) => ({
-        agentId: id,
-        roots: [a.cwd, join(root, 'agents', id), ...(home ? wsRoots.map((r) => join(home, r, id)) : [])]
-          .filter(Boolean) as string[],
-      }));
+      .map(([id, a]) => {
+        // md-223 N1: the id is joined as a path segment, so it is the one way this
+        // feature could produce a false DENY. A hand-edited registry id like
+        // '../code-worktrees/<colleague>/portal' would both own the colleague's
+        // checkout (flagging their own writes) and knock their root out of
+        // ownedRoots as a container; '../../etc' would own outside harnessHome. So an
+        // id that is not one plain segment derives no root at all — failing toward
+        // owning LESS, like everything else here. Its registered cwd still counts.
+        const plain = /^[A-Za-z0-9._-]+$/.test(id) && id !== '.' && id !== '..';
+        const derived = plain ? [join(root, 'agents', id), ...(home ? wsRoots.map((r) => join(home, r, id)) : [])] : [];
+        return { agentId: id, roots: [a.cwd, ...derived].filter(Boolean) as string[] };
+      });
   }
 
   /** Build the policy engine once, on first PreToolUse. */
