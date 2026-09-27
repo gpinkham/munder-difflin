@@ -3002,6 +3002,7 @@ process.stdin.on('end', () => {
   // Best effort, and ordered so it cannot matter: the row is written inside a
   // try/catch and the exit(0) is outside it, so a missing HIVE_ROOT, a read-only
   // disk or a wedged path costs the evidence and never the contract.
+  let resp = '';
   const failopen = (reason) => {
     try {
       const root = process.env.HIVE_ROOT;
@@ -3012,14 +3013,23 @@ process.stdin.on('end', () => {
           reason: reason,
           agent_id: payload.agent_id || null,
           tool: payload.tool_name || null,
-          hook_event: payload.hook_event_name || null
+          hook_event: payload.hook_event_name || null,
+          // md-222 N1: both arms below bypass done(), so a reply that already arrived is
+          // dropped — possibly a DENY. The drop is the declared fail-open contract and
+          // stays, but without this field the row claims "the engine was never asked",
+          // which for that case is false. md-220's whole cost was mis-reading this
+          // evidence, so a confidently wrong row would be worse than the old silence.
+          // Reading resp.length cannot throw, and resp is '' on the no_socket path —
+          // which fires before any connect — so answered:false is accurate there.
+          answered: resp.length > 0
         }) + '\\n');
       }
     } catch (_) { /* the ledger is evidence, never a dependency */ }
     process.exit(0);
   };
-  if (!sock) { failopen('no_socket'); }
-  let resp = '';
+  // N3: return, so that if a later edit ever makes failopen's exit conditional this
+  // cannot fall through into net.createConnection(undefined, …) and die with a TypeError.
+  if (!sock) { return failopen('no_socket'); }
   const done = (code) => { if (resp) process.stdout.write(resp); process.exit(code); };
   const c = net.createConnection(sock, () => c.write(JSON.stringify(payload) + '\\n'));
   c.setEncoding('utf8');
