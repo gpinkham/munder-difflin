@@ -2956,6 +2956,8 @@ write there become searchable by every agent. You don't run \`mine\` yourself.
 const HOOK_SHIM = `#!/usr/bin/env node
 'use strict';
 const net = require('net');
+const fs = require('fs');
+const path = require('path');
 const isStatus = process.argv.includes('--status');
 let data = '';
 process.stdin.setEncoding('utf8');
@@ -2990,15 +2992,41 @@ process.stdin.on('end', () => {
     setTimeout(() => process.exit(0), 1500).unref();
     return;
   }
-  if (!sock) { process.exit(0); }
+  // Fail-open, but never SILENTLY (md-222). Exiting 0 with no stdout is how this
+  // shim says "allow", and it does that whenever the daemon cannot be reached —
+  // deliberate, see policy.ts's header. The cost was that the logs could not tell
+  // an evaluated allow from a call the engine never saw: an allow writes no row
+  // either, so "nothing in the log" meant both. md-220 spent an investigation on
+  // exactly that ambiguity. Each path now says which one it was.
+  //
+  // Best effort, and ordered so it cannot matter: the row is written inside a
+  // try/catch and the exit(0) is outside it, so a missing HIVE_ROOT, a read-only
+  // disk or a wedged path costs the evidence and never the contract.
+  const failopen = (reason) => {
+    try {
+      const root = process.env.HIVE_ROOT;
+      if (root) {
+        fs.appendFileSync(path.join(root, 'log.jsonl'), JSON.stringify({
+          ts: Date.now(),
+          kind: 'policy-transport-failopen',
+          reason: reason,
+          agent_id: payload.agent_id || null,
+          tool: payload.tool_name || null,
+          hook_event: payload.hook_event_name || null
+        }) + '\\n');
+      }
+    } catch (_) { /* the ledger is evidence, never a dependency */ }
+    process.exit(0);
+  };
+  if (!sock) { failopen('no_socket'); }
   let resp = '';
   const done = (code) => { if (resp) process.stdout.write(resp); process.exit(code); };
   const c = net.createConnection(sock, () => c.write(JSON.stringify(payload) + '\\n'));
   c.setEncoding('utf8');
   c.on('data', (d) => { resp += d; });
   c.on('end', () => done(0));
-  c.on('error', () => process.exit(0));
-  setTimeout(() => process.exit(0), 5000).unref();
+  c.on('error', () => failopen('socket_error'));
+  setTimeout(() => failopen('timeout'), 5000).unref();
 });
 `;
 
