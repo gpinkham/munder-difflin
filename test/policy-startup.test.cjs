@@ -267,3 +267,34 @@ test('md-223 N1: a forged registry id cannot steal a colleague\'s checkout or ow
       assert.deepEqual(w.roots, [elsewhere], `${w.agentId} must not join into a path`);
     }
   });
+
+// --- md-136: the corpus flag, as the HARNESS wires it -------------------------------
+
+const CORPUS = 'decision-corpus.jsonl';
+const corpusPathIn = (hive) => path.join(hive.root(), 'policy', CORPUS);
+
+/** A decision, through the server's own engine, so the config wiring is under test. */
+function decide(server, hive, home) {
+  fs.mkdirSync(path.join(home, 'wt', 'ryan-2'), { recursive: true });
+  return server.policyEngine().evaluate({
+    hook_event_name: 'PreToolUse', agent_id: 'jim-1', tool_name: 'Bash',
+    tool_input: { command: `rm -rf ${path.join(hive.root(), 'agents', 'god')}/memory.md` },
+    cwd: path.join(home, 'repo'),
+  });
+}
+
+test('md-136: the corpus is ON without any config (Gary opted in), and local to the hive', async (t) => {
+  const { server, hive, home } = await floor(t, { 'engine.json': PACK() });
+  const v = decide(server, hive, home);
+  assert.ok(v.ruleId, 'precondition: a rule must fire for there to be a record');
+  const rows = fs.readFileSync(corpusPathIn(hive), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].kind, 'policy-decision-corpus');
+  assert.ok(rows[0].input_digest, 'the join key back to the audit row');
+});
+
+test('md-136: decisionCorpus:false turns it off with no restart and leaves no file', async (t) => {
+  const { server, hive, home } = await floor(t, { 'engine.json': PACK() }, { decisionCorpus: false });
+  assert.ok(decide(server, hive, home).ruleId);
+  assert.equal(fs.existsSync(corpusPathIn(hive)), false);
+});

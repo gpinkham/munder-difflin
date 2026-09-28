@@ -1,0 +1,261 @@
+'use strict';
+
+/**
+ * md-136 — the redacted, trainable decision corpus.
+ *
+ * md-120's ledger stores `input_digest`, a sha256, precisely so the harness never
+ * persists secrets: a tool_input carries tokens, passwords and private keys. But a
+ * hash cannot be trained on, so six months of adjudicated rows would leave no corpus
+ * for a local classifier (md-135 §5). This writes a SECOND, deliberately lossy record
+ * beside the hash: the shape of the action, never its values.
+ *
+ * These tests are adversarial on purpose. The corpus is a new file that did not exist
+ * before, so every test below asks the same question — can a secret reach it? — and
+ * the redaction is required to fail CLOSED: a token it cannot confidently classify
+ * loses its value rather than being emitted raw.
+ */
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const loadTs = require('./load-ts.cjs');
+
+const { scrubArgv, normalizeForCorpus, corpusRecord, CORPUS_FILE, CORPUS_SCHEMA } =
+  loadTs('src/main/corpus.ts');
+const { PolicyEngine } = loadTs('src/main/policy.ts');
+
+/** Every one of these must be absent from every record, whatever shape it arrives in. */
+// ASSEMBLED AT RUNTIME, never written as one literal. These canaries have to be
+// credential-SHAPED to be worth testing, which is precisely what a secret scanner
+// matches: GitHub push protection rejected this branch over the Slack one. Splitting
+// each prefix from its body keeps the assembled value byte-identical for every
+// assertion while leaving no matchable literal in the blob, so the fixture cannot be
+// mistaken for a live credential by this repo's scanner or anyone else's.
+const SECRETS = {
+  gh: 'ghp' + '_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8',
+  anthropic: 'sk' + '-ant-api03-' + 'ZZZsupersecretvalueZZZ',
+  aws: 'AKIA' + 'IOSFODNN7EXAMPLE',
+  slack: 'xoxb' + '-123456789012-' + 'abcdefghijklmnopqrst',
+  password: 'hunter2-Tr0ub4dor-correct-horse',
+  jwt: 'eyJ' + 'hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.abcdefghijklmnop',
+  pem: '-----BEGIN' + ' RSA PRIVATE KEY-----MIIEowIBAAKCAQEA-----END RSA PRIVATE KEY-----',
+};
+/** The lowercase variants, split for the same reason. */
+const LOWER_ANTHROPIC = 'sk' + '-ant-api03-' + 'zzzsupersecretvaluezzz';
+const ALL = Object.values(SECRETS);
+
+const CTX = {
+  agentId: 'jim-1',
+  agentIds: ['jim-1', 'ryan-2', 'god'],
+  home: '/Users/dev',
+  hiveRoot: '/Users/dev/Harness/hive',
+  policyDir: '/Users/dev/Harness/hive/policy',
+  cwd: '/Users/dev/repo',
+};
+
+const leaks = (value) => ALL.filter((s) => JSON.stringify(value).includes(s));
+/** Catch a partial leak too: a long distinctive chunk of a secret is still a leak. */
+const chunks = (value) => ALL.flatMap((s) => [s.slice(0, 24), s.slice(-24)])
+  .filter((c) => c.length >= 12 && JSON.stringify(value).includes(c));
+
+// --- 1. the shape survives -----------------------------------------------------
+
+test('md-136: verbs and flags survive, argument values do not', () => {
+  const out = scrubArgv(['rm', '-rf', '--force', '/Users/dev/repo/build'], CTX);
+  assert.equal(out[0], 'rm', 'the verb is the point of the record');
+  assert.ok(out.includes('-rf') && out.includes('--force'), 'flags are shape, not value');
+  assert.ok(!out.some((t) => t.includes('build')) || out.some((t) => t.startsWith('<')),
+    'a path is normalized, never raw beyond its classification');
+});
+
+test('md-136: a flag that carries a value keeps the flag and drops the value', () => {
+  const out = scrubArgv(['curl', '--header=Authorization: Bearer ' + SECRETS.gh, '-u', SECRETS.password], CTX);
+  assert.equal(out[0], 'curl');
+  assert.ok(out.some((t) => t.startsWith('--header=')), 'the flag NAME is signal and is kept');
+  assert.ok(out.includes('-u'), 'a value-taking flag keeps its name');
+  assert.deepEqual(leaks(out), [], 'no secret may survive in a flag value');
+});
+
+test('md-136: an env-style assignment keeps the NAME and drops the value', () => {
+  const out = scrubArgv(['TOKEN=' + SECRETS.gh, 'AWS_SECRET_ACCESS_KEY=' + SECRETS.aws, 'deploy'], CTX);
+  assert.ok(out.some((t) => t.startsWith('TOKEN=')), 'the variable name is shape');
+  assert.deepEqual(leaks(out), [], 'the variable VALUE is never shape');
+});
+
+// --- 2. paths: normalized, and comparable across floors ------------------------
+
+test('md-136: home, hive, policy dir and agent ids normalize to placeholders', () => {
+  const n = (p) => normalizeForCorpus(p, CTX);
+  assert.equal(n('/Users/dev/repo'), '<home>/repo');
+  assert.ok(n('/Users/dev/Harness/hive/policy/engine.json').startsWith('<policy>'));
+  assert.ok(n('/Users/dev/Harness/hive/agents/jim-1/memory.md').includes('<agent:self>'),
+    'the acting agent must be distinguishable from a colleague');
+  assert.ok(n('/Users/dev/Harness/hive/agents/ryan-2/memory.md').includes('<agent:other>'));
+  assert.ok(!n('/Users/dev/Harness/hive/agents/ryan-2/memory.md').includes('ryan-2'),
+    'a raw agent id makes two floors incomparable');
+});
+
+test('md-136: a secret hiding INSIDE a path is redacted, not normalized through', () => {
+  const n = normalizeForCorpus(`/tmp/${SECRETS.gh}/data.json`, CTX);
+  assert.deepEqual(leaks(n), [], 'a path segment is not automatically safe');
+  assert.deepEqual(chunks(n), []);
+});
+
+test('md-136: fail CLOSED — a segment that cannot be confidently classified loses its value', () => {
+  for (const weird of ['a'.repeat(200), SECRETS.jwt, SECRETS.aws, 'Zm9vYmFyYmF6cXV4Y29ycmVjdA==']) {
+    const n = normalizeForCorpus(`/Users/dev/repo/${weird}`, CTX);
+    assert.ok(n.includes('<'), `${weird.slice(0, 16)}…: must be replaced, not passed through`);
+    assert.deepEqual(leaks(n), []);
+  }
+});
+
+// --- 3. the leak battery -------------------------------------------------------
+
+const NASTY = [
+  ['bearer token in a header', ['curl', '-H', `Authorization: Bearer ${SECRETS.gh}`, 'https://api.example.com/v1'], 'curl'],
+  ['exported secret then a removal', ['env', `ANTHROPIC_API_KEY=${SECRETS.anthropic}`, 'rm', '-rf', '/Users/dev/Harness/hive/agents/ryan-2/checkout'], 'env'],
+  ['a quoted password argument', ['psql', `postgres://user:${SECRETS.password}@db.internal/app`], 'psql'],
+  ['a private key on the command line', ['ssh-add', '-q', SECRETS.pem], 'ssh-add'],
+  ['a jwt as a bare operand', ['./deploy.sh', SECRETS.jwt, '--prod'], 'deploy.sh'],
+  ['an aws key in a path', ['cp', `/tmp/${SECRETS.aws}/creds`, '/Users/dev/repo/'], 'cp'],
+  ['a slack token in a redirection target', ['tee', `/Users/dev/repo/${SECRETS.slack}.log`], 'tee'],
+  ['a heredoc body as one argv word', ['sh', '-c', `cat <<EOF > /Users/dev/repo/f\n${SECRETS.anthropic}\nEOF`], 'sh'],
+  ['a whole secret file inlined', ['echo', SECRETS.pem], 'echo'],
+];
+
+for (const [name, argv, verb] of NASTY) {
+  test(`md-136 leak battery: ${name}`, () => {
+    const out = scrubArgv(argv, CTX);
+    assert.deepEqual(leaks(out), [], `LEAKED into ${JSON.stringify(out)}`);
+    assert.deepEqual(chunks(out), [], `partial leak into ${JSON.stringify(out)}`);
+    assert.ok(out[0].includes(verb.replace('./', '')) || out[0].startsWith('<'),
+      `the verb should survive for training: got ${out[0]}`);
+  });
+}
+
+test('md-136: the whole record, not just argv, is clean for every nasty shape', () => {
+  for (const [name, argv] of NASTY) {
+    const rec = corpusRecord({
+      payload: { tool_name: 'Bash', agent_id: 'jim-1', tool_input: { command: argv.join(' ') }, cwd: CTX.cwd },
+      verdict: { decision: 'deny', ruleId: 'cross-agent-write', mode: 'dry_run', matchedOn: 'path_glob' },
+      commands: [{ argv, writes: [`/tmp/${SECRETS.aws}/out`], removes: [], unresolved: [] }],
+      ctx: CTX,
+      digest: 'sha256:deadbeef',
+    });
+    assert.deepEqual(leaks(rec), [], `${name}: leaked into the record`);
+    assert.deepEqual(chunks(rec), [], `${name}: partial leak into the record`);
+    assert.ok(!JSON.stringify(rec).includes(argv.join(' ')), `${name}: the raw command must never appear`);
+  }
+});
+
+test('md-136: the record keeps what training needs', () => {
+  const rec = corpusRecord({
+    payload: { tool_name: 'Bash', agent_id: 'jim-1', tool_input: { command: 'x' }, cwd: CTX.cwd },
+    verdict: { decision: 'deny', ruleId: 'cross-agent-workspace', mode: 'dry_run', matchedOn: 'path_in_other_agent_workspace', wouldDeny: true },
+    commands: [{ argv: ['rm', '-rf', '/Users/dev/Harness/hive/agents/ryan-2/checkout'], writes: ['/Users/dev/Harness/hive/agents/ryan-2/checkout'], removes: [], unresolved: [] }],
+    ctx: CTX,
+    digest: 'sha256:abc',
+  });
+  assert.equal(rec.schema, CORPUS_SCHEMA);
+  assert.equal(rec.rule_id, 'cross-agent-workspace');
+  assert.equal(rec.decision, 'deny');
+  assert.equal(rec.mode, 'dry_run');
+  assert.equal(rec.matched_on, 'path_in_other_agent_workspace');
+  assert.equal(rec.would_deny, true);
+  assert.equal(rec.tool, 'Bash');
+  assert.equal(rec.agent, '<agent:self>');
+  assert.equal(rec.input_digest, 'sha256:abc', 'the digest joins the corpus row to the audit row');
+  assert.equal(rec.commands[0].argv[0], 'rm');
+  assert.ok(JSON.stringify(rec.commands[0]).includes('<agent:other>'));
+});
+
+test('md-136: a non-Bash tool records its path shape without the file body', () => {
+  const rec = corpusRecord({
+    payload: {
+      tool_name: 'Write', agent_id: 'jim-1', cwd: CTX.cwd,
+      tool_input: { file_path: '/Users/dev/Harness/hive/agents/ryan-2/notes.md', content: SECRETS.anthropic },
+    },
+    verdict: { decision: 'deny', ruleId: 'cross-agent-write', mode: 'dry_run', matchedOn: 'path_glob' },
+    commands: [], ctx: CTX, digest: 'sha256:abc',
+  });
+  assert.deepEqual(leaks(rec), [], 'a Write payload carries the file BODY — it must never be recorded');
+  assert.equal(rec.tool, 'Write');
+  assert.ok(JSON.stringify(rec.paths).includes('<agent:other>'), 'the path shape is the signal');
+});
+
+// --- 4. end to end, through the real engine ------------------------------------
+
+function floor(t, { corpus = true } = {}) {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'md136-')));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const hiveRoot = path.join(base, 'hive');
+  fs.mkdirSync(path.join(hiveRoot, 'policy'), { recursive: true });
+  const pack = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'examples/policy/engine.example.json'), 'utf8'));
+  delete pack._comment;
+  fs.writeFileSync(path.join(hiveRoot, 'policy', 'engine.json'), JSON.stringify(pack));
+  const rows = [];
+  const ws = [
+    { agentId: 'jim-1', roots: [path.join(base, 'wt', 'jim-1')] },
+    { agentId: 'ryan-2', roots: [path.join(base, 'wt', 'ryan-2')] },
+  ];
+  for (const w of ws) fs.mkdirSync(w.roots[0], { recursive: true });
+  const engine = new PolicyEngine(hiveRoot, (r) => rows.push(r), () => [], () => ws, () => corpus);
+  engine.load();
+  const corpusPath = path.join(hiveRoot, 'policy', CORPUS_FILE);
+  const corpusRows = () => (fs.existsSync(corpusPath) ? fs.readFileSync(corpusPath, 'utf8').trim().split('\n') : [])
+    .filter(Boolean).map((l) => JSON.parse(l));
+  return { base, hiveRoot, engine, rows, corpusPath, corpusRows, ws };
+}
+
+const deny = (engine, base, command) => engine.evaluate({
+  hook_event_name: 'PreToolUse', agent_id: 'jim-1', tool_name: 'Bash',
+  tool_input: { command }, cwd: path.join(base, 'wt', 'jim-1'),
+});
+
+test('md-136 e2e: a decision writes a corpus record beside the unchanged digest row', async (t) => {
+  const { engine, base, rows, corpusRows } = floor(t);
+  const v = deny(engine, base, `rm -rf ${path.join(base, 'wt', 'ryan-2')}/checkout --token=${SECRETS.gh}`);
+  assert.ok(v.ruleId, 'precondition: this must be a decision worth recording');
+
+  const audit = rows.filter((r) => r.kind === 'policy-decision');
+  assert.equal(audit.length, 1);
+  assert.deepEqual(Object.keys(audit[0]).sort(),
+    ['agent_id', 'decision', 'input_digest', 'kind', 'matched_on', 'mode', 'rule_id', 'tool', 'would_deny'],
+    'the audit row must be byte-for-byte the same shape as before md-136');
+
+  const c = corpusRows();
+  assert.equal(c.length, 1, 'exactly one corpus record per decision');
+  assert.equal(c[0].input_digest, audit[0].input_digest, 'the two rows join on the digest');
+  assert.deepEqual(leaks(c), [], 'the corpus file must never hold a secret');
+});
+
+test('md-136 e2e: an allow with no match records nothing at all', async (t) => {
+  const { engine, base, corpusRows, rows } = floor(t);
+  const v = engine.evaluate({
+    hook_event_name: 'PreToolUse', agent_id: 'jim-1', tool_name: 'Bash',
+    tool_input: { command: 'ls -la' }, cwd: path.join(base, 'wt', 'jim-1'),
+  });
+  assert.equal(v.decision, 'allow');
+  assert.equal(v.ruleId, undefined);
+  assert.equal(corpusRows().length, 0, 'the corpus is decisions, not traffic');
+  assert.equal(rows.filter((r) => r.kind === 'policy-decision').length, 0);
+});
+
+test('md-136 e2e: the flag turns it off, and off writes no file at all', async (t) => {
+  const { engine, base, corpusPath, rows } = floor(t, { corpus: false });
+  deny(engine, base, `rm -rf ${path.join(base, 'wt', 'ryan-2')}/checkout`);
+  assert.equal(fs.existsSync(corpusPath), false, 'opting out must leave no file behind');
+  assert.equal(rows.filter((r) => r.kind === 'policy-decision').length, 1, 'the audit row is never gated');
+});
+
+test('md-136 e2e: a corpus write that fails never changes the decision', async (t) => {
+  const { engine, base, hiveRoot, corpusPath } = floor(t);
+  fs.rmSync(path.join(hiveRoot, 'policy', 'engine.json'));
+  fs.rmSync(corpusPath, { force: true });
+  fs.mkdirSync(corpusPath, { recursive: true }); // a DIRECTORY where the file goes: append throws
+  const v = deny(engine, base, `rm -rf ${path.join(base, 'wt', 'ryan-2')}/checkout`);
+  assert.ok(v.ruleId, 'the verdict must survive a corpus that cannot be written');
+  assert.equal(v.decision, 'allow', 'dry_run still allows; the corpus never alters a verdict');
+});

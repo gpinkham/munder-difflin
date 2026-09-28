@@ -331,7 +331,10 @@ export class HookServer {
         // and the qwen proxy synthesizes PostToolUse only (it observes traffic
         // after the fact, so there is no before-the-action boundary to hold).
         () => ['pi', 'opencode', 'qwen'],
-        () => { try { return this.agentWorkspaces(); } catch { return []; } }
+        () => { try { return this.agentWorkspaces(); } catch { return []; } },
+        // md-136: on unless the config file says otherwise. Read per decision, so
+        // turning it off takes effect without a restart.
+        () => { try { return this.getConfig().decisionCorpus !== false; } catch { return false; } }
       );
       this.policy.load();
     }
