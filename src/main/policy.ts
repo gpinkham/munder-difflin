@@ -43,11 +43,13 @@
  */
 import { readFileSync, existsSync, appendFileSync, readdirSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   effectiveCommands, realAbsolute, inlineScript, scriptLiterals, scriptWrites, operandsOf, verbOf,
   STRUCTURAL_UNRESOLVED, type EffectiveCommand, type Unresolved,
 } from './shell';
+import { corpusRecord, CORPUS_FILE, type CorpusContext } from './corpus';
 
 /** Where a rule's path matcher reads its subject from, per tool. */
 const PATH_FIELDS = ['file_path', 'notebook_path', 'path'] as const;
@@ -341,6 +343,7 @@ export class PolicyEngine {
   private rules: PolicyRule[] = [];
   private policyPath: string;
   private policyDir: string;
+  private hiveRoot: string | null;
   private loadError: string | null = null;
   /** True once a policy FILE has been found on disk. Self-protection is armed by
    *  this, not by rule count: an install with no policy file must behave
@@ -366,8 +369,14 @@ export class PolicyEngine {
     /** Every agent's workspace roots, for `path_in_other_agent_workspace`. Read per
      *  evaluation that needs it, because agents are spawned and archived while the
      *  daemon runs. Optional: without it that matcher never fires. */
-    private workspaces: () => AgentWorkspace[] = () => []
+    private workspaces: () => AgentWorkspace[] = () => [],
+    /** md-136: whether to write the redacted training corpus beside the digest row.
+     *  Read per decision so the operator can turn it off without a restart. Defaults
+     *  OFF here so an engine built without the wiring behaves exactly as before; the
+     *  harness supplies the config, where it defaults ON. */
+    private corpusEnabled: () => boolean = () => false
   ) {
+    this.hiveRoot = hiveRoot;
     this.policyDir = hiveRoot ? join(hiveRoot, 'policy') : '';
     this.policyPath = this.policyDir ? join(this.policyDir, ENGINE_POLICY_FILE) : '';
   }
@@ -682,7 +691,7 @@ export class PolicyEngine {
           'The policy file governs every agent, so no agent may edit it. If a rule is wrong, '
           + 'say which rule and why in your reply — the operator changes it.',
       };
-      this.record(p, verdict);
+      this.record(p, verdict, ctx);
       return verdict;
     }
 
@@ -704,7 +713,7 @@ export class PolicyEngine {
             decision: 'deny', ruleId: rule.id, mode: 'live', matchedOn: 'error',
             reason: `${rule.reason} (this rule could not be evaluated and is configured to fail closed)`,
           };
-          this.record(p, verdict);
+          this.record(p, verdict, ctx);
           return verdict;
         }
         continue; // fail open: this rule abstains, later rules still run
@@ -720,13 +729,13 @@ export class PolicyEngine {
           decision: 'allow', ruleId: rule.id, reason: rule.reason,
           mode, matchedOn: hit, wouldDeny: true,
         };
-        this.record(p, verdict);
+        this.record(p, verdict, ctx);
         return verdict;
       }
       const verdict: PolicyVerdict = {
         decision: rule.decision, ruleId: rule.id, reason: rule.reason, mode, matchedOn: hit,
       };
-      this.record(p, verdict);
+      this.record(p, verdict, ctx);
       return verdict;
     }
     return { decision: 'allow' };
@@ -823,9 +832,10 @@ export class PolicyEngine {
    * allow, and never the raw tool_input — tool inputs carry file contents and
    * secrets, so the row keeps a digest plus which matcher fired.
    */
-  private record(p: PolicyPayload, v: PolicyVerdict): void {
+  private record(p: PolicyPayload, v: PolicyVerdict, ctx?: EvalContext): void {
     if (v.decision === 'deny') this.stats.denied++;
     else if (v.decision === 'ask') this.stats.asked++;
+    const input_digest = digest(p.tool_input);
     this.log({
       kind: 'policy-decision',
       agent_id: p.agent_id ?? null,
@@ -835,8 +845,39 @@ export class PolicyEngine {
       mode: v.mode,
       would_deny: v.wouldDeny ?? false,
       matched_on: v.matchedOn,
-      input_digest: digest(p.tool_input),
+      input_digest,
     });
+    this.recordCorpus(p, v, ctx, input_digest);
+  }
+
+  /**
+   * md-136: the redacted training record, beside the hash and never instead of it.
+   *
+   * Everything that could carry a value goes through corpus.ts, which emits shape or a
+   * placeholder and nothing in between. Wrapped exactly like the ledger in md-222: the
+   * write is best effort and cannot reach the verdict, because a corpus that failed to
+   * append must never be the reason an action was allowed or denied.
+   */
+  private recordCorpus(p: PolicyPayload, v: PolicyVerdict, ctx: EvalContext | undefined, input_digest: string): void {
+    if (!this.policyDir || !this.corpusEnabled()) return;
+    try {
+      const cctx: CorpusContext = {
+        agentId: p.agent_id ?? null,
+        agentIds: this.workspaces().map((w) => w.agentId),
+        home: homedir(),
+        hiveRoot: this.hiveRoot,
+        policyDir: this.policyDir,
+        cwd: p.cwd,
+      };
+      const row = corpusRecord({
+        payload: { tool_name: p.tool_name, agent_id: p.agent_id, tool_input: p.tool_input, cwd: p.cwd },
+        verdict: { decision: v.decision, ruleId: v.ruleId, mode: v.mode, matchedOn: v.matchedOn, wouldDeny: v.wouldDeny },
+        commands: ctx?.commands ?? [],
+        ctx: cctx,
+        digest: input_digest,
+      });
+      appendFileSync(join(this.policyDir, CORPUS_FILE), JSON.stringify({ ts: new Date().toISOString(), ...row }) + '\n');
+    } catch { /* the corpus is a byproduct, never a dependency */ }
   }
 
   /**

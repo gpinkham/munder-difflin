@@ -194,6 +194,15 @@ export interface HarnessConfig {
    *  persistConfig would then freeze today's default into every config.json on its
    *  next save, and a later change to the default would never reach them. */
   workspaceRoots?: string[];
+  /** Config-file only, no UI (md-136). Write a redacted, LOCAL-ONLY training record
+   *  beside each guardrail decision, in `<hive>/policy/decision-corpus.jsonl`: the shape
+   *  of the action (verbs, flag names, normalized paths and agent ids) and never a
+   *  value. The `input_digest` audit row in log.jsonl is unchanged and remains the audit
+   *  record; this is a second, deliberately lossy file whose only job is to make a local
+   *  classifier possible later (md-135 §5), because a hash cannot be trained on.
+   *  Unset means ON — Gary opted in. Set `false` to stop writing it; the file is plain
+   *  JSONL and can simply be deleted. Never leaves this machine. */
+  decisionCorpus?: boolean;
   /** Recently-opened hive home folders (most-recent first), surfaced by the
    *  launch-time hive picker. Maintained by writeConfig whenever harnessHome is
    *  set (onboarding finish, changeHome). Capped to a handful. */
