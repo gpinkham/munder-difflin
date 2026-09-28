@@ -373,3 +373,65 @@ test('md-136 N2: skipping global flags does not open a value channel', () => {
       'a credential in the post-global-flag subcommand slot must still go');
   }
 });
+
+// --- md-136 N6 (Dwight re-review): the N2 stepping walked ONTO flag values ---------
+//
+// My N2 stepping skipped an unrecognised leading flag assuming it took no value. When it
+// does, the index landed on that flag's VALUE and wrote it verbatim — and the flags this
+// happens to are called --token, --password, -u, -p. This is a REGRESSION: the separated
+// form `--token SECRET` was safe before N2, and it is the ordinary way a secret reaches a
+// command line. GLOBAL_VALUE_FLAGS can never be complete across 33 programs' CLIs, so the
+// guess itself was the bug: on an unrecognised flag, give up on finding a subcommand.
+
+const D_VECTORS = [
+  ['kubectl --token', ['kubectl', '--token', 'hunter2password', 'get', 'pods'], 'hunter2password'],
+  ['docker -u', ['docker', '-u', 'rootpassword', 'ps'], 'rootpassword'],
+  ['aws --profile', ['aws', '--profile', 'prodsecret', 's3', 'ls'], 'prodsecret'],
+  ['pip --proxy', ['pip', '--proxy', 'hunter2proxy', 'install', 'pkg'], 'hunter2proxy'],
+  ['helm --kube-token', ['helm', '--kube-token', 'deploykey1234', 'install'], 'deploykey1234'],
+  ['kubectl -n', ['kubectl', '-n', 'mysecretns', 'get', 'pods'], 'mysecretns'],
+];
+
+for (const [name, argv, secret] of D_VECTORS) {
+  test(`md-136 N6: ${name} <SECRET> — the flag's value is never captured`, () => {
+    const out = scrubArgv(argv, CTX);
+    assert.ok(!out.includes(secret), `LEAKED the flag value verbatim: ${JSON.stringify(out)}`);
+    assert.ok(!JSON.stringify(out).includes(secret), `LEAKED: ${JSON.stringify(out)}`);
+  });
+}
+
+test('md-136 N6: an UNRECOGNISED leading flag makes us give up rather than guess', () => {
+  // The whole point: we cannot enumerate every CLI, so an unknown flag must not be
+  // assumed value-less. Whatever follows it is never captured as a subcommand.
+  for (const flag of ['--totally-unknown-flag', '--some-future-option', '-Z']) {
+    const out = scrubArgv(['kubectl', flag, 'hunter2password', 'get'], CTX);
+    assert.ok(!out.includes('hunter2password'),
+      `${flag}: guessed onto the value — ${JSON.stringify(out)}`);
+  }
+});
+
+test('md-136 N6: the benign captures the stepping existed for still work', () => {
+  assert.equal(scrubArgv(['git', '-C', '/Users/dev/repo', 'push', '--force'], CTX)[3], 'push',
+    'this is the case N2 was added for and it must survive the N6 fix');
+  assert.equal(scrubArgv(['git', '--no-pager', 'status'], CTX)[2], 'status');
+  assert.equal(scrubArgv(['git', 'push'], CTX)[1], 'push');
+  assert.equal(scrubArgv(['npm', 'publish'], CTX)[1], 'publish');
+});
+
+test('md-136 N6: listing a credential flag recovers the SUBCOMMAND without its value', () => {
+  // Safety here does not depend on this list — an unlisted flag hits the give-up branch
+  // and is equally safe. The list is what buys back the signal, so it needs its own
+  // test: without this, deleting the entries would pass every other test silently.
+  for (const [argv, want] of [
+    [['kubectl', '--token', 'hunter2password', 'get', 'pods'], 'get'],
+    [['docker', '-u', 'rootpassword', 'ps'], 'ps'],
+    [['aws', '--profile', 'prodsecret', 's3', 'ls'], 's3'],
+    [['pip', '--proxy', 'hunter2proxy', 'install', 'pkg'], 'install'],
+    [['helm', '--kube-token', 'deploykey1234', 'install'], 'install'],
+    [['kubectl', '-n', 'mysecretns', 'get', 'pods'], 'get'],
+  ]) {
+    const out = scrubArgv(argv, CTX);
+    assert.ok(out.includes(want), `${argv[0]} ${argv[1]}: lost the subcommand — ${JSON.stringify(out)}`);
+    assert.ok(!out.includes(argv[2]), `and the value must still be gone — ${JSON.stringify(out)}`);
+  }
+});
