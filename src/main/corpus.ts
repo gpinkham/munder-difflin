@@ -21,17 +21,25 @@
  * the cost of over-redacting is a weaker training signal and the cost of under-redacting
  * is a secret on disk.
  *
+ * THE EXACT CLAIM, because a looser one would be false (md-136 N-review): no value is
+ * emitted except an ordinary-name-shaped path segment. A secret stored AS a pathname and
+ * shaped like an ordinary word WILL survive; credential-shaped strings will not, in any
+ * position — including a flag NAME, which is why the flag branch runs the same test a
+ * path segment does.
+ *
  * WHAT THIS IS NOT. Not a secret scanner. It never tries to decide whether a given
  * string IS a secret and keep it when it looks innocent — that test is unwinnable and a
  * single false negative is permanent. It works the other way round: a segment is kept
  * only when it is positively recognisable as an ordinary, non-secret name, and the
- * prefix and entropy checks below only REMOVE things that would otherwise have passed
- * that test. A password shaped exactly like a filename is still dropped when it appears
+ * prefix and separator-run checks below only REMOVE things that would otherwise have
+ * passed it. A password shaped exactly like a filename is still dropped when it appears
  * anywhere a value can appear, because operands are dropped by position, not by looks.
  */
 
-/** Bumped when the record shape changes, so a corpus is never silently mixed. */
-export const CORPUS_SCHEMA = 1;
+/** Bumped when the record shape changes, so a corpus is never silently mixed.
+ *  2 — the subcommand of a multi-verb program is kept (md-136 N2). Schema-1 rows
+ *  predate that and record it as `<arg>`, so they are not comparable on it. */
+export const CORPUS_SCHEMA = 2;
 
 /** Local-only, and beside the policy it describes: `<hive>/policy/`. That directory is
  *  already the one place agents may not write (policy self-protection), and keeping the
@@ -137,8 +145,58 @@ export function normalizeForCorpus(raw: unknown, ctx: CorpusContext): string {
 const ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=/;
 const PATH_LIKE = /^(\/|\.\.?\/|~\/)/;
 
+/**
+ * md-136 N1. A flag NAME is an argument like any other — two dashes in front of a
+ * string do not make it shape. The first pass returned `--<name>` whenever it matched
+ * a flag-ish regex, which applies none of the checks a path segment must pass, so
+ * `curl --sk-ant-api03-…` was written verbatim: the very string that is `<x>` one
+ * branch away. The name now runs the same `safeSegment` test, de-dashed.
+ */
+function flagNameIsShape(name: string): boolean {
+  return /^--[A-Za-z0-9][A-Za-z0-9-]*$/.test(name) && safeSegment(name.replace(/^-+/, ''));
+}
+
+/**
+ * md-136 N2. Programs whose real verb is the SECOND word. Two of the four shipped rules
+ * match on `command_matches`, i.e. verb plus subcommand — `git push` is an ask and
+ * `git status` is nothing — so recording both as `['git','<arg>']` destroys precisely
+ * the distinction this corpus exists to learn.
+ */
+const MULTI_VERB = new Set([
+  'git', 'gh', 'hub', 'npm', 'npx', 'yarn', 'pnpm', 'bun', 'deno', 'pip', 'pip3',
+  'docker', 'podman', 'kubectl', 'helm', 'cargo', 'go', 'dotnet', 'brew', 'apt',
+  'apt-get', 'systemctl', 'aws', 'gcloud', 'az', 'terraform', 'gradle', 'mvn',
+  'bundle', 'composer', 'flatpak', 'snap', 'mempalace',
+]);
+
+/** A subcommand is still an ARGUMENT POSITION, so it is kept only when it looks like a
+ *  keyword: lowercase, short, and passing the same segment test everything else does. */
+const SUBCOMMAND = /^[a-z][a-z0-9-]{0,19}$/;
+
+/** Global flags that swallow the next word, so the subcommand is not the token after
+ *  the program. `git -C <dir> push` is the dominant real form and the one `remote-push`
+ *  matches, so an index-1 rule would record `<arg>` for exactly the case that matters.
+ *  Explicit and small on purpose: skipping an unknown flag's value would mean guessing. */
+const GLOBAL_VALUE_FLAGS = new Set([
+  '-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path',
+  '--config', '--context', '--cluster', '--chdir', '--cwd', '--prefix',
+]);
+
+/** Where the subcommand sits: the first non-flag token, stepping over leading global
+ *  flags and the values they take. Only an INDEX — whatever lands there still has to
+ *  pass the keyword and segment tests before any of it is written. */
+function subcommandIndex(argv: string[]): number {
+  let i = 1;
+  while (i < argv.length) {
+    const t = argv[i];
+    if (typeof t !== 'string' || !t.startsWith('-') || t === '-' || t === '--') break;
+    i += GLOBAL_VALUE_FLAGS.has(t) ? 2 : 1;
+  }
+  return i;
+}
+
 /** One argv token, reduced to shape. Position decides the rule, never appearance. */
-function scrubToken(tok: string, index: number, ctx: CorpusContext): string {
+function scrubToken(tok: string, index: number, ctx: CorpusContext, prog: string, subAt: number): string {
   if (typeof tok !== 'string') return '<arg>';
   // An assignment can precede the program (`TOKEN=… deploy`), so it is checked first.
   const assign = ASSIGNMENT.exec(tok);
@@ -149,18 +207,22 @@ function scrubToken(tok: string, index: number, ctx: CorpusContext): string {
     return safeSegment(base) ? base : '<prog>';
   }
 
+  // The verb's second half, and only there: the first token after a known multi-verb
+  // program, and only when it is keyword-shaped. A credential in that slot is still a
+  // value and still goes.
+  if (index === subAt && MULTI_VERB.has(prog) && SUBCOMMAND.test(tok) && safeSegment(tok)) return tok;
+
   if (tok.startsWith('--')) {
     const eq = tok.indexOf('=');
-    if (eq !== -1) {
-      const name = tok.slice(0, eq);
-      return /^--[A-Za-z0-9][A-Za-z0-9-]*$/.test(name) ? `${name}=<v>` : '<flag>=<v>';
-    }
-    return /^--[A-Za-z0-9][A-Za-z0-9-]*$/.test(tok) ? tok : '<flag>';
+    const name = eq === -1 ? tok : tok.slice(0, eq);
+    const suffix = eq === -1 ? '' : '=<v>';
+    return flagNameIsShape(name) ? `${name}${suffix}` : `<flag>${suffix}`;
   }
   if (tok.startsWith('-') && tok.length > 1) {
     // A short cluster is shape; a value ATTACHED to one (`-uSECRET`) is not, so only
-    // the flag letters survive.
-    if (/^-[A-Za-z]+$/.test(tok)) return tok;
+    // the flag letters survive. The length cap matters: `-AKIAIOSFODNNEXAMPLE` is a
+    // credential, not a nineteen-letter cluster, and no real one is that long.
+    if (/^-[A-Za-z]{1,8}$/.test(tok)) return tok;
     const m = /^(-[A-Za-z])/.exec(tok);
     return m ? `${m[1]}<v>` : '<flag>';
   }
@@ -175,7 +237,9 @@ function scrubToken(tok: string, index: number, ctx: CorpusContext): string {
 /** A parsed command reduced to shape: the verb, its flags, and where it points. */
 export function scrubArgv(argv: unknown, ctx: CorpusContext): string[] {
   if (!Array.isArray(argv)) return [];
-  return argv.map((t, i) => scrubToken(t as string, i, ctx));
+  const first = typeof argv[0] === 'string' ? (argv[0] as string).split('/').pop() ?? '' : '';
+  const subAt = subcommandIndex(argv as string[]);
+  return argv.map((t, i) => scrubToken(t as string, i, ctx, first, subAt));
 }
 
 /** The subset of a tool input that names a path. The rest of a tool input — `content`,
@@ -214,6 +278,10 @@ export function corpusRecord(input: CorpusInput): Record<string, unknown> {
     .filter((f) => typeof ti[f] === 'string' && ti[f])
     .map((f) => normalizeForCorpus(ti[f], ctx));
 
+  // BUILT FIELD BY FIELD, NEVER SPREAD. `EffectiveCommand` also carries `text`, the raw
+  // command as written, and a `{ ...c }` here would put it — secrets and all — straight
+  // into the record. Listing the fields is what keeps it out, so this is load-bearing
+  // and not a style choice; a test asserts the raw text never appears.
   const commands = (input.commands ?? []).map((c) => ({
     argv: scrubArgv(c.argv, ctx),
     writes: (c.writes ?? []).map((w) => normalizeForCorpus(w, ctx)),
