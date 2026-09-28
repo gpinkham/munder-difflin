@@ -259,3 +259,117 @@ test('md-136 e2e: a corpus write that fails never changes the decision', async (
   assert.ok(v.ruleId, 'the verdict must survive a corpus that cannot be written');
   assert.equal(v.decision, 'allow', 'dry_run still allows; the corpus never alters a verdict');
 });
+
+// --- md-136 N1 (Dwight): a flag NAME is a value too -------------------------------
+//
+// The first pass checked flag VALUES and never flag NAMES, so a name went out through
+// `--<name>` with none of the checks a path segment must pass — no length cap, no
+// credential prefix, no run heuristic. `curl --sk-ant-api03-…` was written verbatim:
+// the very string that is correctly `<x>` one line away, as a path segment. An argument
+// does not become shape by having two dashes in front of it.
+
+const FLAG_LEAKS = [
+  ['a long-flag whose NAME is the secret', ['curl', '--' + SECRETS.anthropic]],
+  ['a long-flag name with a value after it', ['curl', '--' + SECRETS.gh + '=x']],
+  ['a github token as a long flag', ['x', '--' + SECRETS.gh]],
+  ['an aws key as an attached short option', ['tar', '-' + SECRETS.aws]],
+  ['a pure-alpha short cluster that is a credential', ['tar', '-AKIA' + 'IOSFODNNEXAMPLE']],
+  ['a lowercased anthropic key as a flag', ['curl', '--' + LOWER_ANTHROPIC]],
+];
+
+for (const [name, argv] of FLAG_LEAKS) {
+  test(`md-136 N1: ${name}`, () => {
+    const out = scrubArgv(argv, CTX);
+    assert.deepEqual(leaks(out), [], `LEAKED via a flag name into ${JSON.stringify(out)}`);
+    assert.deepEqual(chunks(out), [], `partial leak into ${JSON.stringify(out)}`);
+    assert.ok(!out.some((t) => t.includes('AKIA' + 'IOSFODNNEXAMPLE') || t.includes(LOWER_ANTHROPIC.slice(0, 16))),
+      `credential-shaped flag name survived: ${JSON.stringify(out)}`);
+  });
+}
+
+test('md-136 N1: ordinary flags are untouched by the fix', () => {
+  const argv = ['tar', '--force', '--dry-run', '--token', '-rf', '-xzvf', '--max-count=5', '-C'];
+  const out = scrubArgv(argv, CTX);
+  assert.deepEqual(out, ['tar', '--force', '--dry-run', '--token', '-rf', '-xzvf', '--max-count=<v>', '-C'],
+    'the fix must not cost the flag shape that makes a record trainable');
+});
+
+// --- md-136 N2 (Gary approved): the subcommand is the signal ----------------------
+//
+// Two of the four shipped rules match on `command_matches`, i.e. verb PLUS subcommand:
+// `git push` is an ask, `git status` is nothing. Recording both as ['git','<arg>']
+// destroys exactly the distinction the corpus exists to learn. The subcommand slot is
+// still an argument position, though, so it is kept only when it looks like a keyword.
+
+test('md-136 N2: a subcommand after a multi-verb program survives', () => {
+  for (const [argv, want] of [
+    [['git', 'push', '--force'], 'push'],
+    [['git', 'status'], 'status'],
+    [['git', 'worktree', 'remove'], 'worktree'],
+    [['npm', 'publish'], 'publish'],
+    [['docker', 'build', '-t'], 'build'],
+    [['gh', 'pr', 'create'], 'pr'],
+    [['kubectl', 'delete'], 'delete'],
+  ]) {
+    const out = scrubArgv(argv, CTX);
+    assert.equal(out[1], want, `${argv.join(' ')}: the subcommand is the signal md-135 wants`);
+  }
+});
+
+test('md-136 N2: a subcommand slot holding a secret is still dropped', () => {
+  for (const secret of ALL.concat([LOWER_ANTHROPIC, 'a'.repeat(64)])) {
+    const out = scrubArgv(['git', secret], CTX);
+    // A placeholder, whichever one: a PEM begins with '-' so it lands in the flag
+    // branch. What matters is that the slot never carries the value.
+    assert.ok(out[1].startsWith('<'), `a value in the subcommand slot must not be kept: ${JSON.stringify(out)}`);
+  }
+  assert.deepEqual(leaks(scrubArgv(['git', SECRETS.gh, 'push'], CTX)), []);
+});
+
+test('md-136 N2: only the FIRST token, and only for a known multi-verb program', () => {
+  assert.equal(scrubArgv(['rm', 'push'], CTX)[1], '<arg>', 'rm has no subcommands — that is an operand');
+  assert.equal(scrubArgv(['git', 'push', 'origin'], CTX)[2], '<arg>', 'a remote NAME is a value, not shape');
+});
+
+test('md-136 N2: the schema version is bumped, so early rows are distinguishable', () => {
+  assert.ok(CORPUS_SCHEMA >= 2, 'rows written before the subcommand existed must be tellable apart');
+});
+
+// --- md-136: the raw command text must never reach the record ---------------------
+
+test('md-136: EffectiveCommand.text never appears, even though it is on the input object', () => {
+  const raw = `curl -H "Authorization: Bearer ${SECRETS.gh}" https://api.example.com`;
+  const rec = corpusRecord({
+    payload: { tool_name: 'Bash', agent_id: 'jim-1', tool_input: { command: raw }, cwd: CTX.cwd },
+    verdict: { decision: 'deny', ruleId: 'r', mode: 'dry_run', matchedOn: 'command_matches' },
+    // `text` is a real field of EffectiveCommand. It is kept out only because the
+    // record is BUILT field by field rather than spread, so this guards a refactor.
+    commands: [{ argv: ['curl', '-H', 'x'], text: raw, writes: [], removes: [], unresolved: [] }],
+    ctx: CTX, digest: 'sha256:abc',
+  });
+  assert.ok(!JSON.stringify(rec).includes('Authorization'), 'the raw command text leaked into the record');
+  assert.deepEqual(leaks(rec), []);
+  assert.equal(rec.commands[0].text, undefined, 'no `text` field may survive onto a record');
+});
+
+test('md-136 N2: a global flag before the subcommand does not hide it', () => {
+  // The dominant real form, and the one `remote-push` actually matches:
+  // `git -C <dir> push`. shell.ts keeps the global flags in argv, so the subcommand
+  // is not at index 1 and a naive index-1 rule records `<arg>` for the very case the
+  // corpus most needs.
+  assert.equal(scrubArgv(['git', '-C', '/Users/dev/repo', 'push', '--force'], CTX)[3], 'push');
+  assert.equal(scrubArgv(['git', '--no-pager', 'status'], CTX)[2], 'status');
+  assert.equal(scrubArgv(['git', '-C', '/Users/dev/repo', 'worktree', 'remove'], CTX)[3], 'worktree');
+});
+
+test('md-136 N2: skipping global flags does not open a value channel', () => {
+  // The flag VALUE that was skipped over is still scrubbed as an ordinary token, and
+  // the subcommand slot still has to look like a keyword.
+  const out = scrubArgv(['git', '-C', `/tmp/${SECRETS.aws}`, SECRETS.gh], CTX);
+  assert.deepEqual(leaks(out), [], `leaked: ${JSON.stringify(out)}`);
+  assert.deepEqual(chunks(out), []);
+  for (const secret of ALL) {
+    assert.deepEqual(leaks(scrubArgv(['git', '-C', '/Users/dev/repo', secret], CTX)), [],
+      'a credential in the post-global-flag subcommand slot must still go');
+  }
+});
