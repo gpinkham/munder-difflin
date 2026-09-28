@@ -176,21 +176,49 @@ const SUBCOMMAND = /^[a-z][a-z0-9-]{0,19}$/;
 /** Global flags that swallow the next word, so the subcommand is not the token after
  *  the program. `git -C <dir> push` is the dominant real form and the one `remote-push`
  *  matches, so an index-1 rule would record `<arg>` for exactly the case that matters.
- *  Explicit and small on purpose: skipping an unknown flag's value would mean guessing. */
+ *  Credential-bearing flags are listed so their VALUE is stepped over rather than
+ *  stumbled onto — but the set is not, and cannot be, complete (md-136 N6). */
 const GLOBAL_VALUE_FLAGS = new Set([
   '-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path',
   '--config', '--context', '--cluster', '--chdir', '--cwd', '--prefix',
+  '-n', '-p', '-u', '-t', '-e', '-f', '-o',
+  '--token', '--password', '--passwd', '--key', '--api-key', '--secret',
+  '--profile', '--otp', '--proxy', '--kube-token', '--user', '--username',
+  '--registry', '--host', '--server', '--region', '--file', '--output',
 ]);
 
-/** Where the subcommand sits: the first non-flag token, stepping over leading global
- *  flags and the values they take. Only an INDEX — whatever lands there still has to
- *  pass the keyword and segment tests before any of it is written. */
+/** Leading flags that take NO value, so the next word really is the subcommand. */
+const GLOBAL_BOOL_FLAGS = new Set([
+  '--no-pager', '--paginate', '--bare', '--quiet', '--verbose', '--debug',
+  '--no-color', '--help', '--version', '-q', '-v',
+]);
+
+/**
+ * Where the subcommand sits: the first non-flag token, stepping over leading global
+ * flags and the values they take. Only an INDEX — whatever lands there still has to
+ * pass the keyword and segment tests before any of it is written.
+ *
+ * md-136 N6, and the reason this returns -1. The first version stepped over an
+ * unrecognised flag ASSUMING it took no value; when it does, the index landed on that
+ * flag's VALUE and wrote it verbatim — and the flags this happens to are called
+ * `--token`, `--password`, `-u`, `-p`. `--token SECRET` was safe before the subcommand
+ * feature existed, so that was a regression, and the worst kind: the ordinary way a
+ * secret reaches a command line. The sets above cannot be completed across 33 programs'
+ * CLIs, so completeness is the wrong fix and the GUESS was the bug. On anything
+ * unrecognised we give up on finding a subcommand at all: -1 matches no index, so
+ * nothing is captured. The cost is signal (`kubectl -n ns get pods` may lose `get`),
+ * recoverable later by adding a flag to a set — never by trusting a guess again.
+ */
 function subcommandIndex(argv: string[]): number {
   let i = 1;
   while (i < argv.length) {
     const t = argv[i];
     if (typeof t !== 'string' || !t.startsWith('-') || t === '-' || t === '--') break;
-    i += GLOBAL_VALUE_FLAGS.has(t) ? 2 : 1;
+    if (GLOBAL_VALUE_FLAGS.has(t)) { i += 2; continue; }
+    // `--flag=value` carries its own value, so the next word is still the subcommand.
+    if (t.startsWith('--') && t.includes('=')) { i += 1; continue; }
+    if (GLOBAL_BOOL_FLAGS.has(t)) { i += 1; continue; }
+    return -1; // an unknown flag may eat the next word — do not guess onto it
   }
   return i;
 }
