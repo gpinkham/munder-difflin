@@ -80,6 +80,8 @@ test('a zero-failure claim is found; done, counts and "no new failures" are not 
     'Done. Suite green.', 'All tests pass.', 'tests passing, 0 failures', 'no failures', 'Tests are green',
     'The suite passes.', 'Everything passes.', 'tests: all passed', '100% passing', '12 passed, 0 failed',
     'I did not touch the engine, and all tests pass.',
+    // Dwight's recheck: real reports the modal list swallowed, and this office's own summary style.
+    'I can confirm all tests pass.', 'I will note that all tests pass.', 'Once more: all tests pass.', '1126 tests, 0 fail', 'All green.',
   ]) assert.ok(greenClaims(text).length > 0, text);
   for (const text of [
     'Done.', 'Done: 1082 pass, 22 fail, same 22 as the baseline.', 'no new failures', 'Scan clean.',

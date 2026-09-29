@@ -162,10 +162,10 @@ export function outcomeOf(p: OutcomePayload): ToolOutcome | null {
  * deliveries" are not claims about tests.
  */
 export function greenClaims(text: string): string[] {
-  const CLAIM = /\b(?:all (?:the )?tests? (?:pass(?:ed|es|ing)?|green)|tests?:? (?:are |all )?(?:pass(?:ed|es|ing)?|green)|(?:the )?suite (?:is |was |now )?(?:green|passing|pass(?:es|ed))|everything pass(?:es|ed)|100% pass(?:ing|es)?|(?:0|zero|no) (?:test )?(?:failures?|failing)(?![-\w])|0 failed\b(?!\s+[a-z])|green (?:suite|tests?|build|run))/gi;
+  const CLAIM = /\b(?:all (?:the )?tests? (?:pass(?:ed|es|ing)?|green)|tests?:? (?:are |all )?(?:pass(?:ed|es|ing)?|green)|(?:the )?suite (?:is |was |now )?(?:green|passing|pass(?:es|ed))|everything pass(?:es|ed)|100% pass(?:ing|es)?|(?:0|zero|no) (?:test )?(?:failures?|failing)(?![-\w])|(?:0|zero) fail(?![-\w])|0 failed\b(?!\s+[a-z])|green (?:suite|tests?|build|run)|^all green\b)/gi;
   const NEGATION = /\b(?:not|never|no longer|isn't|aren't|wasn't|weren't|doesn't|didn't|won't|cannot|can't)\b/i;
   // A condition, a requirement or a question is not a report of what happened.
-  const HYPOTHETICAL = /\b(?:if|once|when|whenever|until|unless|before|after|need|needs|should|must|would|will|could|can|want|expect)\b/i;
+  const HYPOTHETICAL = /\b(?:if|once(?!\s+more)|when|whenever|until|unless|before|after|need|needs|should|must|would|could|want|expect)\b/i;
   // Someone else's words, relayed: not this agent's claim about its own run.
   const RELAYED = /\b(?:says?|said|reports?|reported|claims?|claimed|according to|wrote|writes)\b/i;
   const found = new Set<string>();
