@@ -88,6 +88,70 @@ test('H1c. the neighbours of those routes that publish nothing are not asked abo
   }
 });
 
+// Found in review (Dwight, 2026-09-29): each of these writes to GitHub with no
+// write verb on the command line, or in a verb's lower case.
+test('H1e. a write the tool performs implicitly is asked about', () => {
+  const { e } = shipped();
+  for (const command of [
+    'gh api repos/o/r/pulls -f head=feat/x -f base=main',
+    'gh api repos/o/r/issues -F title=x',
+    'gh api repos/o/r/issues --field title=x',
+    'gh api repos/o/r/issues --raw-field body=y',
+    'gh api repos/o/r/issues --input body.json',
+    'gh api graphql -f query=\'mutation { addStar(input:{starrableId:"x"}) { clientMutationId } }\'',
+    'gh api --method post repos/o/r/issues',
+    'gh api -X delete repos/o/r/git/refs/heads/x',
+    'curl -XPOST https://api.github.com/repos/o/r/issues',
+    'curl --request post https://api.github.com/repos/o/r/issues',
+    'curl -d @b.json https://api.github.com/repos/o/r/issues',
+    'curl --data-binary @b.json https://api.github.com/repos/o/r/issues',
+    'curl --json \'{"title":"x"}\' https://api.github.com/repos/o/r/issues',
+    'curl -H "Content-Type: application/octet-stream" --data-binary @a.zip "https://uploads.github.com/repos/o/r/releases/1/assets?name=a.zip"',
+    'curl -T a.zip https://uploads.github.com/repos/o/r/releases/1/assets'
+  ]) {
+    const v = e.evaluate(pre('Bash', { command }));
+    assert.equal(v.decision, 'ask', command);
+    assert.equal(v.ruleId, 'remote-push', command);
+  }
+});
+
+test('H1f. --dry-run given as the VALUE of a flag does not exempt a real push', () => {
+  const { e } = shipped();
+  for (const command of [
+    'git push -o --dry-run origin main',
+    'git push --push-option --dry-run origin main',
+    'gh pr merge 12 -b --dry-run'
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command })).decision, 'ask', command);
+  }
+  // Fails closed: a real dry run behind a flag is asked about too. One prompt.
+  assert.equal(e.evaluate(pre('Bash', { command: 'git push -v --dry-run' })).decision, 'ask');
+});
+
+test('H1g. reads, local calls and real dry runs near those shapes still pass', () => {
+  const { e } = shipped();
+  for (const command of [
+    'gh api repos/o/r/issues',
+    'gh api -X GET repos/o/r/issues -f state=open',
+    'gh api --method get repos/o/r/issues -F per_page=100',
+    'gh api graphql -f query=\'query { viewer { login } }\'',
+    'gh api repos/o/r/contents/README.md --jq .sha',
+    'curl https://api.github.com/repos/o/r',
+    'curl -fsSL https://api.github.com/repos/o/r/releases/latest',
+    'curl -H "Accept: application/vnd.github+json" https://api.github.com/user',
+    'curl -d @b.json http://localhost:8080/hook',
+    'curl -o a.zip https://uploads.github.com/x',
+    'git push --dry-run',
+    'git push origin main --dry-run',
+    'git push --dry-run -u origin fix/x',
+    'npm publish --dry-run',
+    'echo "curl -d x https://api.github.com"',
+    'grep -n "gh api" notes.md'
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command })).decision, 'allow', command);
+  }
+});
+
 test('H1d. GAP: a deploy to a remote host proceeds with no ask',
   { todo: 'deferred by Gary 2026-09-29: whether rsync/scp to a remote host counts as publishing' }, () => {
     const { e } = shipped();
