@@ -564,6 +564,17 @@ export interface PreservedWorktreeSnapshot {
   preservedAt: number;
 }
 
+/** One approval waiting for the operator (HAG-49), as main holds it. */
+export interface PendingGrant {
+  id: string;
+  agent_id: string;
+  command: string;
+  cwd: string | null;
+  reason: string;
+  requested_at: string;
+  action: { class: string; summary: string; target: { remote_url: string; ref: string; sha: string } };
+}
+
 const api = {
   version: __APP_VERSION__,
 
@@ -862,6 +873,16 @@ const api = {
     ipcRenderer.invoke('history:search', query, limit),
   hiveSend: (msg: Partial<HiveMessage>, from?: string): Promise<{ ok: boolean; error?: string; message?: HiveMessage }> =>
     ipcRenderer.invoke('hive:send', msg, from),
+  /** HAG-49 approvals. All three report "off" unless a policy rule is grantable. */
+  policyGrantsActive: (): Promise<boolean> => ipcRenderer.invoke('policy:grantsActive'),
+  policyPendingGrants: (): Promise<PendingGrant[]> => ipcRenderer.invoke('policy:pendingGrants'),
+  policyDecideGrant: (requestId: string, approve: boolean): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('policy:decideGrant', requestId, approve),
+  onPolicyGrantsChanged: (cb: () => void): (() => void) => {
+    const listener = () => cb();
+    ipcRenderer.on('policy:grantsChanged', listener);
+    return () => ipcRenderer.removeListener('policy:grantsChanged', listener);
+  },
 
   onHiveHookEvent: (
     cb: (e: HookEvent) => void

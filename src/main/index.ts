@@ -3889,6 +3889,13 @@ hive.setRoutedObserver((msg, targets) => {
   hookServer.checkDelivered(msg);
 });
 hive.setCaptureToolFailures(() => hookServer.reportCheckActive());
+// HAG-49: both are no-ops unless a policy rule is grantable.
+hive.setApprovalHandler((agentId, msg) => hookServer.handleApprovalRequest(agentId, msg));
+hive.setGrantsActive(() => hookServer.grantsActive());
+ipcMain.handle('policy:grantsActive', () => hookServer.grantsActive());
+ipcMain.handle('policy:pendingGrants', () => hookServer.pendingGrants());
+ipcMain.handle('policy:decideGrant', (_e, requestId: unknown, approve: unknown) =>
+  typeof requestId === 'string' ? hookServer.decideGrant(requestId, approve === true) : { ok: false, error: 'bad request id' });
 ipcMain.handle('app:startClosingTime', () => closingTime.start());
 ipcMain.handle('app:cancelClosingTime', () => closingTime.cancel());
 

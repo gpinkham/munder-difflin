@@ -44,6 +44,7 @@
 import { readFileSync, existsSync, appendFileSync, readdirSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import { canonicalAction, GrantStore, GRANT_CLASSES, gitRemoteResolver, type Grant, type RemoteResolver } from './grants';
 import {
   effectiveCommands, realAbsolute, inlineScript, scriptLiterals, scriptWrites, operandsOf, verbOf,
   STRUCTURAL_UNRESOLVED, type EffectiveCommand, type Unresolved,
@@ -205,6 +206,13 @@ export interface PolicyRule {
   mode?: PolicyMode;
   on_error?: 'allow' | 'deny';
   reason: string;
+  /**
+   * Opt-in (HAG-49): action classes an operator may approve one at a time. When an
+   * `ask` rule fires on an action that fits the class grammar and the agent holds a
+   * matching grant, the call is allowed and the grant is used. Omit it and the rule
+   * asks every time, exactly as before. Valid only on `ask` rules.
+   */
+  grantable?: string[];
   match: {
     tool?: string | string[];
     path_glob?: string;
@@ -276,6 +284,8 @@ export interface PolicyVerdict {
   matchedOn?: string;
   /** True when a rule in dry_run mode would have denied. The action proceeds. */
   wouldDeny?: boolean;
+  /** The grant that allowed an `ask` rule's action (live), or would have (dry_run). */
+  grantId?: string;
 }
 
 /**
@@ -374,7 +384,9 @@ export class PolicyEngine {
     /** Every agent's workspace roots, for `path_in_other_agent_workspace`. Read per
      *  evaluation that needs it, because agents are spawned and archived while the
      *  daemon runs. Optional: without it that matcher never fires. */
-    private workspaces: () => AgentWorkspace[] = () => []
+    private workspaces: () => AgentWorkspace[] = () => [],
+    /** How a git remote name becomes a URL, for grants. Injected by tests. */
+    private remoteResolver: RemoteResolver = gitRemoteResolver
   ) {
     this.policyDir = hiveRoot ? join(hiveRoot, 'policy') : '';
     this.policyPath = this.policyDir ? join(this.policyDir, ENGINE_POLICY_FILE) : '';
@@ -548,6 +560,12 @@ export class PolicyEngine {
     }
     if (rule.mode && rule.mode !== 'dry_run' && rule.mode !== 'live') return `mode must be dry_run or live, got ${String(rule.mode)}`;
     if (rule.on_error && rule.on_error !== 'allow' && rule.on_error !== 'deny') return `on_error must be allow or deny, got ${String(rule.on_error)}`;
+    if (rule.grantable !== undefined) {
+      if (!Array.isArray(rule.grantable) || !rule.grantable.length) return 'grantable must be a non-empty array, e.g. ["git-push"]';
+      const bad = rule.grantable.find((g) => !(GRANT_CLASSES as readonly string[]).includes(g));
+      if (bad !== undefined) return `grantable: unknown action class ${JSON.stringify(bad)} (known: ${GRANT_CLASSES.join(', ')})`;
+      if (rule.decision !== 'ask') return 'grantable is only valid on an ask rule: a grant answers an ask, it does not lift a deny';
+    }
     return null;
   }
 
@@ -739,13 +757,24 @@ export class PolicyEngine {
       if (!hit) continue;
 
       const mode = rule.mode ?? this.defaults.mode;
+      const grant = rule.grantable ? this.grantFor(rule, p) : null;
       if (mode === 'dry_run') {
         // Evaluate fully, log, and ALLOW. You cannot measure a false positive
         // after enforcing, because the deny already stopped the work you would
-        // have judged.
+        // have judged. A grant is noted, not used: it is what live mode would do.
         const verdict: PolicyVerdict = {
           decision: 'allow', ruleId: rule.id, reason: rule.reason,
-          mode, matchedOn: hit, wouldDeny: true,
+          mode, matchedOn: hit, wouldDeny: true, ...(grant ? { grantId: grant.id } : {}),
+        };
+        this.record(p, verdict);
+        return verdict;
+      }
+      if (grant) {
+        // The operator approved exactly this action for this agent. Use the grant
+        // BEFORE returning, so a second identical call sees it used.
+        this.grants().use(grant);
+        const verdict: PolicyVerdict = {
+          decision: 'allow', ruleId: rule.id, reason: rule.reason, mode, matchedOn: hit, grantId: grant.id,
         };
         this.record(p, verdict);
         return verdict;
@@ -757,6 +786,33 @@ export class PolicyEngine {
       return verdict;
     }
     return { decision: 'allow' };
+  }
+
+  /** The grants file. Touched only when a rule is grantable, so an install with no
+   *  grantable rule never reads, creates or names it. */
+  private grantStore: GrantStore | null = null;
+  private grants(): GrantStore {
+    if (!this.grantStore) this.grantStore = GrantStore.in(this.policyDir);
+    return this.grantStore;
+  }
+
+  /** True when some loaded rule is grantable: the switch for the whole approval flow. */
+  get grantsActive(): boolean {
+    return this.rules.some((r) => Array.isArray(r.grantable) && r.grantable.length > 0);
+  }
+
+  /** A grant that covers this exact call, or null. Any error means no grant: it asks. */
+  private grantFor(rule: PolicyRule, p: PolicyPayload): Grant | null {
+    if (rule.decision !== 'ask' || !p.agent_id || !this.policyDir) return null;
+    try {
+      const input = (p.tool_input ?? {}) as Record<string, unknown>;
+      if (p.tool_name !== 'Bash' || typeof input.command !== 'string') return null;
+      const c = canonicalAction(input.command, p.cwd, this.remoteResolver);
+      if (!c.ok || !rule.grantable!.includes(c.action.class)) return null;
+      return this.grants().findUsable(p.agent_id, c.action);
+    } catch {
+      return null;
+    }
   }
 
   /** Which matcher key fired, or null if the rule does not match. */
@@ -863,6 +919,7 @@ export class PolicyEngine {
       would_deny: v.wouldDeny ?? false,
       matched_on: v.matchedOn,
       input_digest: digest(p.tool_input),
+      ...(v.grantId ? { grant_id: v.grantId } : {}),
     });
   }
 

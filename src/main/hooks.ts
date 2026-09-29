@@ -22,6 +22,10 @@ import { estimateCostUsd } from './pricing';
 import { validateHookEvent } from '../shared/hookEvents';
 import { PolicyEngine, type AgentWorkspace, type PolicyStatus } from './policy';
 import { ReportCheck, REPORT_CHECK_SENDER, type ReportMessage } from './reportCheck';
+import { GrantDesk, GrantStore, type GrantRequest } from './grants';
+
+/** The sender name on the approval desk's messages. */
+export const GRANT_DESK_SENDER = 'grant-desk';
 
 /** A policy ask counts as the cause of a permission prompt for this long. */
 const POLICY_PROMPT_WINDOW_MS = 60_000;
@@ -153,6 +157,8 @@ export class HookServer {
   /** The last policy `ask` per agent, so the permission prompt it raises can be told
    *  apart from one Claude raises on its own. Only a loaded policy ever sets it. */
   private policyAsks = new Map<string, { ruleId: string; at: number; cardId?: string }>();
+  /** The approval desk (HAG-49), built only when a loaded rule is grantable. */
+  private desk: GrantDesk | null | undefined = undefined;
 
   constructor(
     private hive: HiveManager,
@@ -390,6 +396,81 @@ export class HookServer {
       const qa = (task?.humanQA ?? []).map((e: HumanQA) => (e.a ? e : { ...e, a: 'Answered in the terminal.', answeredAt: now }));
       this.hive.patchTask(ask.cardId, { status: 'done', humanQA: qa });
     } catch { /* best-effort */ }
+  }
+
+  /** The grant desk, or null when no rule is grantable. Decided once per daemon. */
+  private grantDesk(): GrantDesk | null {
+    if (this.desk === undefined) {
+      const root = this.hive.root();
+      this.desk = root && this.policyEngine().grantsActive ? new GrantDesk(GrantStore.in(join(root, 'policy'))) : null;
+    }
+    return this.desk;
+  }
+
+  /** True when the policy file makes some rule grantable. The UI shows nothing otherwise. */
+  grantsActive(): boolean {
+    try { return this.grantDesk() !== null; } catch { return false; }
+  }
+
+  /**
+   * An agent's `approval-request` outbox message. Returns false when approvals are
+   * off, so the hive routes the message as it always did.
+   */
+  handleApprovalRequest(agentId: string, msg: Record<string, unknown>): boolean {
+    const desk = this.grantDesk();
+    if (!desk) return false;
+    const log = (row: Record<string, unknown>) => this.hive.appendLog(row as Parameters<HiveManager['appendLog']>[0]);
+    const r = desk.request(agentId, { command: msg.command, cwd: msg.cwd, reason: msg.reason ?? msg.body });
+    if (!r.ok) {
+      log({ kind: 'grant-request-refused', agent_id: agentId, why: r.why });
+      this.hive.send({
+        to: agentId, act: 'refuse', subject: 'Approval request not accepted',
+        body: `It cannot be approved as written: ${r.why}.
+The approvable form is one Bash call: git [-C <dir>] push <remote> <40-char sha>:refs/heads/<branch>, sent as {"act":"approval-request","command":"…","cwd":"<dir>","reason":"…"}. Anything else still needs the operator in person.`,
+      }, GRANT_DESK_SENDER);
+      return true;
+    }
+    const q = r.request;
+    log({ kind: 'grant-requested', request_id: q.id, agent_id: agentId, class: q.action.class, target: q.action.target });
+    this.hive.send({
+      to: agentId, act: 'inform', subject: `Approval requested: ${q.action.summary}`,
+      body: `Request ${q.id} is waiting for the operator. Do not run the push until a message says it is approved; then run exactly the command you sent, as one Bash call, within 60 minutes.`,
+    }, GRANT_DESK_SENDER);
+    this.hive.send({
+      to: 'god', act: 'inform', subject: `${agentId} is waiting on the operator: ${q.action.summary}`,
+      body: `The operator approves or denies it under Approvals in the ASK ME tab. ${agentId} will wait; nothing to relay.`,
+    }, GRANT_DESK_SENDER);
+    this.notify(agentId, `Approval needed: ${q.action.summary}`);
+    this.getWebContents()?.send('policy:grantsChanged');
+    return true;
+  }
+
+  /** What the operator sees: main's own copy of each pending request. */
+  pendingGrants(): GrantRequest[] {
+    try { return this.grantDesk()?.pending() ?? []; } catch { return []; }
+  }
+
+  /** The operator's Approve or Deny. Reached only from the app's own UI, never an agent. */
+  decideGrant(requestId: string, approve: boolean): { ok: boolean; error?: string } {
+    const desk = this.grantDesk();
+    if (!desk) return { ok: false, error: 'approvals are off in the policy file' };
+    const d = desk.decide(requestId, approve === true);
+    if (!d) return { ok: false, error: 'that request is no longer pending' };
+    const { request: q, grant } = d;
+    this.hive.appendLog({
+      kind: 'grant-decided', request_id: q.id, agent_id: q.agent_id, approved: !!grant, grant_id: grant?.id ?? null,
+    } as Parameters<HiveManager['appendLog']>[0]);
+    this.hive.send(grant
+      ? {
+        to: q.agent_id, act: 'agree', subject: `Approved: ${q.action.summary}`,
+        body: `Grant ${grant.id}. Run exactly this, as one Bash call, before ${grant.expires_at}:\n${q.command}\nIt works once; the identical command may be retried within 10 minutes of the first run. Any other push still asks.`,
+      }
+      : {
+        to: q.agent_id, act: 'refuse', subject: `Denied: ${q.action.summary}`,
+        body: `The operator denied request ${q.id}. Do not run it.`,
+      }, GRANT_DESK_SENDER);
+    this.getWebContents()?.send('policy:grantsChanged');
+    return { ok: true };
   }
 
   stop(): void {

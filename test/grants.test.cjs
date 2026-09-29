@@ -1,0 +1,271 @@
+'use strict';
+/**
+ * HAG-49 action-bound approval. A grant covers one action class, one exact target
+ * (remote URL, ref, sha), one agent, 60 minutes, and a 10-minute retry of the
+ * identical action after first use. Minted only by the operator's Approve in the
+ * app; stored in the self-protected policy directory. Entirely opt-in: nothing of
+ * it exists unless a policy rule lists `grantable`.
+ */
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const loadTs = require('./load-ts.cjs');
+
+const electron = require.resolve('electron');
+require.cache[electron] = {
+  id: electron, filename: electron, loaded: true,
+  exports: { Notification: class { show() {} static isSupported() { return false; } } }
+};
+
+const { canonicalAction, GrantStore, GrantDesk, GRANT_TTL_MS, GRANT_RETRY_MS } = loadTs('src/main/grants.ts');
+const { PolicyEngine } = loadTs('src/main/policy.ts');
+const { HiveManager } = loadTs('src/main/hive.ts');
+const { HookServer } = loadTs('src/main/hooks.ts');
+const { describeGrant, orderPending } = loadTs('src/renderer/src/components/approvals.ts');
+
+const SHA = '270d83f1c2c5572d4eec1d66819c64168ecd7a61';
+const SHA2 = '16932d7397ef17ba0c8db6b236a37fc46eb53f6b';
+const URL = 'git@github.com:o/r.git';
+const PUSH = `git push origin ${SHA}:refs/heads/feat/x`;
+/** Remote names resolve per directory; `evil` points somewhere else. */
+const resolver = (dir, remote) => (remote === 'origin' ? URL : remote === 'evil' ? 'git@evil.example:o/r.git' : null);
+
+// --- What can be granted ---------------------------------------------------------
+
+test('the one approvable form canonicalises to its exact target', () => {
+  for (const command of [
+    PUSH, `git push -u origin ${SHA}:refs/heads/feat/x`, `git -C /r push origin ${SHA}:refs/heads/feat/x`,
+    `bash -c "git push origin ${SHA}:refs/heads/feat/x"`,
+  ]) {
+    const c = canonicalAction(command, '/r', resolver);
+    assert.ok(c.ok, `${command}: ${c.why}`);
+    assert.deepEqual(c.action.target, { remote_url: URL, ref: 'refs/heads/feat/x', sha: SHA });
+    assert.equal(c.action.class, 'git-push');
+  }
+});
+
+test('everything broader cannot be granted, with a reason', () => {
+  for (const command of [
+    `cd /r && ${PUSH}`, `git commit --amend --no-edit && ${PUSH}`, `git push --force origin ${SHA}:refs/heads/x`,
+    `git push -f origin ${SHA}:refs/heads/x`, `git push --force-with-lease origin ${SHA}:refs/heads/x`,
+    'git push --all origin', 'git push --tags origin', `git push --delete origin x`, 'git push origin feat/x',
+    'git push origin HEAD:refs/heads/x', `git push origin ${SHA.slice(0, 8)}:refs/heads/x`, `git push origin ${SHA}:refs/tags/v1`,
+    `git push origin ${SHA}:refs/heads/a ${SHA}:refs/heads/b`, `git push origin +${SHA}:refs/heads/x`,
+    `git push origin ${SHA}:refs/heads/a..b`, 'git push origin $SHA:refs/heads/x', `git push nowhere ${SHA}:refs/heads/x`,
+    `git -c alias.p=push p origin ${SHA}:refs/heads/x`, 'gh pr merge 12', `git push`,
+  ]) {
+    const c = canonicalAction(command, '/r', resolver);
+    assert.equal(c.ok, false, command);
+    assert.ok(c.why.length > 10, command);
+  }
+});
+
+// --- The store ----------------------------------------------------------------------
+
+function store() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md-grants-'));
+  return { dir, s: new GrantStore(path.join(dir, 'grants.jsonl')) };
+}
+const action = (sha = SHA, url = URL) => ({ class: 'git-push', target: { remote_url: url, ref: 'refs/heads/feat/x', sha }, summary: '' });
+const request = (agent = 'jim', a = action()) => ({ id: 'r_1', agent_id: agent, command: PUSH, cwd: '/r', reason: '', action: a, requested_at: '' });
+
+test('a grant matches only its own agent, remote, ref and sha', () => {
+  const { s } = store();
+  const t0 = Date.parse('2026-09-29T12:00:00Z');
+  const g = s.mint(request(), t0);
+  assert.equal(s.findUsable('jim', action(), t0 + 1000).id, g.id);
+  assert.equal(s.findUsable('pam', action(), t0 + 1000), null, 'another agent');
+  assert.equal(s.findUsable('jim', action(SHA2), t0 + 1000), null, 'the sha moved');
+  assert.equal(s.findUsable('jim', action(SHA, 'git@evil.example:o/r.git'), t0 + 1000), null, 'another remote');
+  assert.equal(s.findUsable('jim', action(), t0 + GRANT_TTL_MS + 1), null, 'expired');
+});
+
+test('one use, then only the identical retry within 10 minutes', () => {
+  const { s } = store();
+  const t0 = Date.parse('2026-09-29T12:00:00Z');
+  const g = s.mint(request(), t0);
+  s.use(g, t0 + 60_000);
+  assert.ok(s.findUsable('jim', action(), t0 + 60_000 + GRANT_RETRY_MS - 1), 'a retry inside the window');
+  assert.equal(s.findUsable('jim', action(), t0 + 60_000 + GRANT_RETRY_MS + 1), null, 'not after it');
+});
+
+test('a torn or missing file grants nothing', () => {
+  const { dir, s } = store();
+  assert.equal(s.findUsable('jim', action()), null);
+  fs.writeFileSync(path.join(dir, 'grants.jsonl'), '{"op":"mint","grant":{"id":"g_x","agent_id":"jim"\n');
+  assert.equal(s.findUsable('jim', action()), null);
+});
+
+test('the desk mints only on Approve, once, from its own copy of the request', () => {
+  const { dir, s } = store();
+  const desk = new GrantDesk(s, resolver);
+  const bad = desk.request('jim', { command: `git push --force origin ${SHA}:refs/heads/x`, cwd: '/r' });
+  assert.equal(bad.ok, false);
+  const r = desk.request('jim', { command: PUSH, cwd: '/r', reason: 'ship HAG-49' });
+  assert.ok(r.ok);
+  assert.equal(desk.pending().length, 1);
+  const d = desk.decide(r.request.id, true);
+  assert.ok(d.grant);
+  assert.equal(desk.decide(r.request.id, true), null, 'decided once');
+  assert.equal(desk.pending().length, 0);
+  const denied = desk.request('jim', { command: PUSH, cwd: '/r' });
+  assert.equal(desk.decide(denied.request.id, false).grant, null);
+  const mints = fs.readFileSync(path.join(dir, 'grants.jsonl'), 'utf8').trim().split('\n').filter((l) => l.includes('"mint"'));
+  assert.equal(mints.length, 1, 'Deny mints nothing');
+});
+
+// --- The engine ---------------------------------------------------------------------
+
+const PUSH_RULE = {
+  id: 'remote-push', decision: 'ask', mode: 'live', reason: 'Pushing is the operator\'s call.',
+  grantable: ['git-push'], match: { tool: 'Bash', command_matches: '^git(?:\\s+-C\\s+\\S+)*\\s+push\\b' },
+};
+function engine(rules) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'md-grant-engine-'));
+  fs.mkdirSync(path.join(root, 'policy'));
+  fs.writeFileSync(path.join(root, 'policy', 'engine.json'), JSON.stringify({ version: 1, rules }));
+  const rows = [];
+  const e = new PolicyEngine(root, (r) => rows.push(r), () => [], () => [], resolver);
+  e.load();
+  return { e, rows, root, grants: new GrantStore(path.join(root, 'policy', 'grants.jsonl')) };
+}
+const pre = (command, agent_id = 'jim', cwd = '/r') => ({ hook_event_name: 'PreToolUse', agent_id, tool_name: 'Bash', tool_input: { command }, cwd });
+
+test('grantable is validated at load', () => {
+  for (const [bad, why] of [
+    [{ ...PUSH_RULE, grantable: ['gh-pr'] }, /unknown action class/],
+    [{ ...PUSH_RULE, grantable: [] }, /non-empty/],
+    [{ ...PUSH_RULE, decision: 'deny' }, /only valid on an ask rule/],
+  ]) {
+    const { e, rows } = engine([bad]);
+    assert.equal(e.ruleCount, 0);
+    assert.match(rows.find((r) => r.kind === 'policy-load-failed').error, why);
+  }
+});
+
+test('live: no grant asks; a grant allows exactly that push, logged with its id', () => {
+  const { e, rows, grants } = engine([PUSH_RULE]);
+  assert.equal(e.evaluate(pre(PUSH)).decision, 'ask');
+  const g = grants.mint(request());
+  const v = e.evaluate(pre(PUSH));
+  assert.equal(v.decision, 'allow');
+  assert.equal(v.grantId, g.id);
+  assert.equal(rows.at(-1).grant_id, g.id);
+  assert.equal(e.evaluate(pre(`git push origin ${SHA2}:refs/heads/feat/x`)).decision, 'ask', 'the sha moved');
+  assert.equal(e.evaluate(pre(PUSH, 'pam')).decision, 'ask', 'another agent');
+  assert.equal(e.evaluate(pre(`git push evil ${SHA}:refs/heads/feat/x`)).decision, 'ask', 'a re-pointed remote');
+  assert.equal(e.evaluate(pre(`git push --force origin ${SHA}:refs/heads/feat/x`)).decision, 'ask');
+  assert.equal(e.evaluate(pre(`git commit --amend --no-edit && ${PUSH}`)).decision, 'ask', 'amend-and-push in one call');
+});
+
+test('dry_run notes the grant and does not use it', () => {
+  const { e, root, grants } = engine([{ ...PUSH_RULE, mode: 'dry_run' }]);
+  const g = grants.mint(request());
+  const v = e.evaluate(pre(PUSH));
+  assert.equal(v.decision, 'allow');
+  assert.equal(v.wouldDeny, true);
+  assert.equal(v.grantId, g.id);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, 'policy', 'grants.jsonl'), 'utf8'), /"use"/);
+});
+
+test('an agent cannot forge or reset a grant: the grants file is self-protected', () => {
+  const { e, root } = engine([PUSH_RULE]);
+  const file = path.join(root, 'policy', 'grants.jsonl');
+  assert.equal(e.evaluate({ hook_event_name: 'PreToolUse', agent_id: 'jim', tool_name: 'Write', tool_input: { file_path: file, content: '{}' } }).decision, 'deny');
+  assert.equal(e.evaluate(pre(`echo '{"op":"mint"}' >> ${file}`)).decision, 'deny');
+  assert.equal(e.evaluate(pre(`rm ${file}`)).decision, 'deny');
+});
+
+test('a rule without grantable never reads or creates the grants file', () => {
+  const { grantable, ...plain } = PUSH_RULE;
+  const { e, root } = engine([plain]);
+  assert.equal(e.grantsActive, false);
+  assert.equal(e.evaluate(pre(PUSH)).decision, 'ask');
+  assert.equal(fs.existsSync(path.join(root, 'policy', 'grants.jsonl')), false);
+});
+
+// --- The floor: opt-in, and the whole flow when on ---------------------------------
+
+async function floor(t, policy) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-grant-floor-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const hive = new HiveManager(() => home);
+  if (policy) {
+    fs.mkdirSync(path.join(home, 'hive', 'policy'), { recursive: true });
+    fs.writeFileSync(path.join(home, 'hive', 'policy', 'engine.json'), JSON.stringify(policy));
+  }
+  const server = new HookServer(hive, () => null, () => ({}), undefined, undefined);
+  // Wired exactly as index.ts wires it.
+  hive.setApprovalHandler((agentId, msg) => server.handleApprovalRequest(agentId, msg));
+  hive.setGrantsActive(() => server.grantsActive());
+  await hive.ensureAgent({ id: 'god-1', name: 'God', provider: 'claude', cwd: home, isGod: true });
+  const inj = await hive.ensureAgent({ id: 'jim-1', name: 'Jim', provider: 'claude', cwd: home });
+  const prompt = inj.args[inj.args.indexOf('--append-system-prompt') + 1];
+  const outbox = path.join(home, 'hive', 'agents', 'jim-1', 'outbox');
+  const drop = (msg) => { fs.writeFileSync(path.join(outbox, `m-${Date.now()}-${Math.random()}.json`), JSON.stringify(msg)); hive.routeOnce(); };
+  const inbox = (id) => { const d = path.join(home, 'hive', 'agents', id, 'inbox'); return fs.readdirSync(d).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(fs.readFileSync(path.join(d, f), 'utf8'))); };
+  const grantsFile = path.join(home, 'hive', 'policy', 'grants.jsonl');
+  const log = () => { const f = path.join(home, 'hive', 'log.jsonl'); return fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : ''; };
+  return { home, hive, server, prompt, drop, inbox, grantsFile, log };
+}
+const REQUEST = { to: 'god', act: 'approval-request', subject: 'push', command: PUSH, cwd: '/r', reason: 'ship it' };
+
+for (const [name, policy] of [['no policy file', null], ['a policy without grantable', { version: 1, rules: [{ ...PUSH_RULE, grantable: undefined }] }]]) {
+  test(`off (${name}): no prompt line, no desk, no UI data, the request is routed as before`, async (t) => {
+    const f = await floor(t, policy);
+    assert.doesNotMatch(f.prompt, /approval-request/);
+    assert.equal(f.server.grantsActive(), false);
+    assert.deepEqual(f.server.pendingGrants(), []);
+    assert.equal(f.server.decideGrant('r_x', true).ok, false);
+    f.drop(REQUEST);
+    assert.equal(f.inbox('god-1').length, 1, 'delivered to god like any message');
+    assert.equal(f.inbox('jim-1').length, 0);
+    assert.equal(fs.existsSync(f.grantsFile), false);
+    assert.doesNotMatch(f.log(), /"kind":"grant-/);
+  });
+}
+
+test('on: request, pending, Approve, grant message, and the engine allows exactly that push', async (t) => {
+  const origin = fs.mkdtempSync(path.join(os.tmpdir(), 'md-grant-repo-'));
+  t.after(() => fs.rmSync(origin, { recursive: true, force: true }));
+  require('node:child_process').execFileSync('git', ['init', '-q', origin]);
+  require('node:child_process').execFileSync('git', ['-C', origin, 'remote', 'add', 'origin', URL]);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  assert.match(f.prompt, /approval-request/);
+  f.drop({ ...REQUEST, cwd: origin });
+  assert.equal(f.inbox('god-1').length, 1, 'god is told the agent is waiting');
+  assert.match(f.inbox('jim-1')[0].subject, /Approval requested/);
+  const [p] = f.server.pendingGrants();
+  assert.equal(p.action.target.remote_url, URL);
+  assert.equal(f.server.decideGrant(p.id, true).ok, true);
+  assert.equal(f.server.decideGrant(p.id, true).ok, false, 'decided once');
+  assert.ok(f.inbox('jim-1').some((m) => m.act === 'agree' && /Grant g_/.test(m.body)));
+  const e = new PolicyEngine(path.join(f.home, 'hive'), () => {});
+  e.load();
+  assert.equal(e.evaluate(pre(PUSH, 'jim-1', origin)).decision, 'allow');
+  assert.equal(e.evaluate(pre(PUSH, 'jim-1', origin)).decision, 'allow', 'the identical retry');
+  assert.match(f.log(), /"kind":"grant-decided"[^\n]*"approved":true/);
+});
+
+test('on: a request that cannot be granted is refused with the reason, and nothing is pending', async (t) => {
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  f.drop({ ...REQUEST, command: 'git push --force origin main' });
+  const [m] = f.inbox('jim-1');
+  assert.equal(m.act, 'refuse');
+  assert.match(m.body, /cannot be approved/);
+  assert.deepEqual(f.server.pendingGrants(), []);
+});
+
+// --- What the operator sees ----------------------------------------------------------
+
+test('the approval card shows the canonical target in full before the agent\'s words', () => {
+  const d = describeGrant({ id: 'r', agent_id: 'jim', command: PUSH, cwd: '/r', reason: 'why', requested_at: '1',
+    action: { class: 'git-push', summary: 'Push feat/x', target: { remote_url: URL, ref: 'refs/heads/feat/x', sha: SHA } } });
+  const labels = d.facts.map(([k]) => k);
+  assert.deepEqual(labels.slice(0, 4), ['Agent', 'Branch', 'Commit', 'Remote']);
+  assert.ok(labels.indexOf('Command') > labels.indexOf('Remote'));
+  assert.equal(d.facts.find(([k]) => k === 'Commit')[1], SHA, 'the whole sha');
+  assert.deepEqual(orderPending([{ requested_at: '2' }, { requested_at: '1' }]).map((x) => x.requested_at), ['1', '2']);
+});

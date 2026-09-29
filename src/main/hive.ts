@@ -1561,6 +1561,11 @@ export class HiveManager {
       `3. To ask another agent for something or share information, write ONE message JSON into ${inDir('outbox')} (schema in PROTOCOL.md). NEVER write into another agent's folder — the orchestrator delivers your outbox.`,
       '4. At the END of a task, append what you learned to memory.md so future-you remembers.',
       guardrailsLine,
+      // HAG-49: only when the policy file makes a rule grantable. Said up front because
+      // an interactive agent that just tries the push freezes on the native prompt.
+      this.grantsActiveSafe()
+        ? 'Approvals: before a git push, request approval for that exact push. Write ONE outbox message {"act":"approval-request","command":"git push <remote> <40-char sha>:refs/heads/<branch>","cwd":"<repo dir>","reason":"<why>"} and wait for the reply; when it says approved, run exactly that command as one Bash call. A push without approval stops at a prompt for the operator.'
+        : '',
       memoryLine,
       knowledgeLine,
       godLine,
@@ -1713,6 +1718,20 @@ export class HiveManager {
   setCaptureToolFailures(fn: () => boolean): void {
     this.captureToolFailures = fn;
   }
+  /** HAG-49: takes an agent's `approval-request` outbox message. Returns true when it
+   *  handled it; false leaves the message to ordinary routing. Unset unless grants are on. */
+  private approvalHandler: ((agentId: string, msg: Record<string, unknown>) => boolean) | null = null;
+  setApprovalHandler(fn: ((agentId: string, msg: Record<string, unknown>) => boolean) | null): void {
+    this.approvalHandler = fn;
+  }
+  /** HAG-49: whether to tell agents how to request an approval. Off by default. */
+  private grantsActive: () => boolean = () => false;
+  setGrantsActive(fn: () => boolean): void {
+    this.grantsActive = fn;
+  }
+  private grantsActiveSafe(): boolean {
+    try { return this.grantsActive() === true; } catch { return false; }
+  }
   setRoutedObserver(cb: ((msg: HiveMessage, targets: string[]) => void) | null): void {
     this.routedObserver = cb;
   }
@@ -1808,6 +1827,17 @@ export class HiveManager {
               file: f,
               repair: 'literal-line-break'
             });
+          }
+          // HAG-49: an approval request goes to main's grant desk, not to an agent. Only
+          // when grants are on; otherwise it is routed like any other message.
+          if ((partial as { act?: unknown }).act === 'approval-request' && this.approvalHandler) {
+            let handled = false;
+            try { handled = this.approvalHandler(id, partial as Record<string, unknown>); } catch { handled = false; }
+            if (handled) {
+              renameSync(full, join(outbox, '.sent', f));
+              routed++;
+              continue;
+            }
           }
           const msg = this.normalize(partial, id);
           msg.from = id; // sender is authoritative — the owning directory

@@ -226,6 +226,57 @@ Known gaps: a run inside a subagent, a test script run from a file, and a runner
 in the list are not recorded. `|| true` hides a failure unless the summary line
 shows a count.
 
+## Approvals: one action at a time (opt-in, off by default)
+
+An `ask` rule stops every push and keeps no memory of consent. In an agent's own
+terminal that is a native prompt, and in an autonomous session nobody may be
+watching it. Approvals turn "yes, push it" into a **grant for one exact action**:
+this agent may push this commit to this branch of this remote, once, within the
+hour.
+
+It is **off unless a rule lists `grantable`**. It is valid only on an `ask` rule:
+
+```json
+{ "id": "remote-push", "decision": "ask", "grantable": ["git-push"], "match": { … }, "reason": "…" }
+```
+
+- **Off** (no rule with `grantable`): nothing of it runs. There is no prompt line
+  for agents, no grants file, no Approvals section in ASK ME, and an
+  `approval-request` message is routed like any other message.
+- **On:**
+  1. Agents are told to send `{"act":"approval-request","command":"git push <remote> <sha>:refs/heads/<branch>","cwd":"<dir>","reason":"…"}`
+     before pushing.
+  2. The app parses the request and shows it under **Approvals** in the ASK ME tab.
+     It lists the branch, the full sha and the remote's resolved URL, then the
+     agent's command and reason.
+  3. **Approve** writes a grant to `policy/grants.jsonl`, and the agent is told to
+     run exactly that command.
+  4. The rule then allows that one push instead of asking.
+
+What a grant covers, and nothing more:
+- **Class:** `git-push`, and only `git [-C <dir>] push [-u] <remote> <40-char sha>:refs/heads/<branch>`
+  as the whole Bash call. Force, `--all`, `--tags`, `--delete`, several refspecs,
+  `cd … && git push`, gh, curl and aliases can never be granted, and they keep
+  asking.
+- **Target:** the remote's URL, which is resolved when the push runs, so re-pointing
+  `origin` breaks the match. Also the ref, and the sha, which is written in the
+  command, so a new commit needs a new approval.
+- **Who:** the one agent that asked.
+- **When:** 60 minutes from approval. After the first use, the identical push may be
+  retried within 10 minutes (a network failure, say); after that the grant is spent.
+
+Only the operator's **Approve** click mints a grant. An ASK ME text answer never
+does, and neither can god or any agent: the answers live in `tasks.json`, which
+agents can write. The grants file sits in this directory, which agents cannot
+write.
+
+In `dry_run` a matching grant is noted on the decision row (`grant_id`) but not
+used, which measures how many real pushes would have had one. A live allow by a
+grant writes a `policy-decision` row with `decision: "allow"` and the `grant_id`.
+
+**Ship the engine before the pack.** An engine older than this feature rejects a rule
+with `grantable`, and one rejected rule unloads the whole file.
+
 ## Why JSON and not YAML
 
 JSON parses with no dependency. Adding a YAML parser would add a runtime dependency

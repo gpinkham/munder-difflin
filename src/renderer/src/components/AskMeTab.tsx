@@ -8,6 +8,7 @@ import { type HiveTask, type HumanQA, openQuestion, waitsOnHuman } from './Tasks
 import { compareByNewestAsk } from './askMeOrder';
 import { isComposingKey } from '@shared/imeGuard';
 import { useRtl } from '@/i18n/useDirection';
+import { ApprovalsPanel } from './ApprovalsPanel';
 
 /**
  * ASK ME — first-class human feedback through the task system.
@@ -56,6 +57,8 @@ export function AskMeTab() {
   const setAnswerDraft = useStore((s) => s.setAnswerDraft);
   const openTaskDetail = useStore((s) => s.openTaskDetail);
   const [sending, setSending] = useState<string | null>(null);
+  // HAG-49: pending approvals (0 and invisible unless the policy turns them on).
+  const [approvals, setApprovals] = useState(0);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refresh = useCallback(async () => {
@@ -167,7 +170,8 @@ export function AskMeTab() {
     // memory viewer uses. Pixelify Sans (font-ui) is too chunky for prose like
     // questions and answers. Display/badge bits keep their explicit faces.
     <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: 'var(--cth-paper-200)', padding: 10, display: 'flex', flexDirection: 'column', gap: 10, fontFamily: 'var(--cth-font-mono)' }}>
-      {waiting.length === 0 && (
+      <ApprovalsPanel onCount={setApprovals} />
+      {waiting.length === 0 && approvals === 0 && (
         <div style={{ textAlign: 'center', padding: '24px 12px', color: 'var(--cth-ink-500)', fontSize: 12 }}>
           {translate('askMe.emptyTitle')}<br />
           <span style={{ fontSize: 11, color: 'var(--cth-ink-300)' }}>
