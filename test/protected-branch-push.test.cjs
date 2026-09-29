@@ -103,6 +103,19 @@ test('P1. every push that names master or production-* as its destination is den
     'git push --push-option -n origin master',
     // a real push after a dry run in the same call
     'git push --dry-run origin master && git push origin master',
+    // Dwight's HAG-50 review: each of these moved master in a real repo
+    'git push -n --no-dry-run origin master',
+    'git push --dry-run --no-dry-run origin master',
+    "git push -o 'x -n y' origin master",
+    "git push --push-option='x --dry-run' origin master",
+    'git push origin HEAD:heads/master',
+    'git push origin heads/master',
+    'git push origin +feat/x:heads/production-1',
+    'git push origin {feat,master}',
+    'git push origin feat/{x,y}',
+    'git --git-dir /r/.git push origin master',
+    'git --work-tree /r push origin master',
+    'git --git-dir /r/.git --work-tree /r push origin HEAD:master',
   ]) {
     const v = e.evaluate(pre(command));
     assert.equal(v.decision, 'deny', command);
@@ -126,6 +139,8 @@ test('P2. feature pushes, dry runs, PR creation and near-miss names are not deni
     'git push origin fix/production-notes',
     'git push origin production',
     'git push origin refs/tags/master',
+    'git push origin feat/heads/master',
+    'git push origin tags/master',
     'git push origin v1.2.3',
     'git push --tags origin',
     'git push --dry-run origin master',

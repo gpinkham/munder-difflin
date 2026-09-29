@@ -128,6 +128,20 @@ test('H1f. --dry-run given as the VALUE of a flag does not exempt a real push', 
   assert.equal(e.evaluate(pre('Bash', { command: 'git push -v --dry-run' })).decision, 'ask');
 });
 
+test('H1h. a push is still asked about when a dry run is cancelled, or hidden behind a git option with a value (Dwight, HAG-50)', () => {
+  const { e } = shipped();
+  for (const command of [
+    'git push --dry-run --no-dry-run origin main',
+    "git push -o 'x --dry-run y' origin main",
+    'git push --push-option="a --dry-run" origin main',
+    'git --git-dir /r/.git push origin main',
+    'git --work-tree /r push origin main',
+    'git --git-dir /r/.git --work-tree /r push origin main',
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command })).decision, 'ask', command);
+  }
+});
+
 test('H1g. reads, local calls and real dry runs near those shapes still pass', () => {
   const { e } = shipped();
   for (const command of [
