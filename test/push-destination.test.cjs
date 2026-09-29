@@ -252,3 +252,14 @@ test('D17. a bare push costs at most three git calls, under one shared deadline'
   assert.equal(v.matchedOn, 'error');
 });
 
+
+test('D18. a crafted refspec cannot stall the main process (linear brace check)', (t) => {
+  const r = repo(t, { branch: 'feat/x' });
+  const { e } = engine(t);
+  for (const w of ['a' + '{,'.repeat(5000) + 'Q', 'a' + '{'.repeat(5000) + ',x}', 'mas{t,}er', '{feat,master}']) {
+    const start = Date.now();
+    const v = decide(e, `git push origin ${w}`, r);
+    assert.ok(Date.now() - start < 1000, `${w.slice(0, 20)}…: ${Date.now() - start} ms`);
+    if (w.length < 20) assert.equal(v.matchedOn, 'error', w);
+  }
+});

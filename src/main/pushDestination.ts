@@ -74,7 +74,10 @@ const unreadable = (why: string): never => { throw new Error(`push destination u
 const noVar = (w: string, what: string) => {
   if (w.includes('$')) unreadable(`${what} holds a variable (${w})`);
   // The parser does not expand braces: {feat,master} is two refspecs to the shell.
-  if (/\{[^}]*(?:,|\.\.)[^}]*\}/.test(w)) unreadable(`${what} uses brace expansion (${w})`);
+  // Innermost {…} groups, then their contents: one pass, so a crafted `{,{,{,…`
+  // cannot make it backtrack (the single regex this replaced was cubic).
+  const groups = w.match(/\{[^{}]*\}/g) ?? [];
+  if (groups.some((g) => g.includes(',') || g.includes('..'))) unreadable(`${what} uses brace expansion (${w.slice(0, 80)})`);
 };
 
 /**
