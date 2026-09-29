@@ -137,6 +137,9 @@ test('H1h. a push is still asked about when a dry run is cancelled, or hidden be
     'git --git-dir /r/.git push origin main',
     'git --work-tree /r push origin main',
     'git --git-dir /r/.git --work-tree /r push origin main',
+    // Dwight: the subtree branch took no global options, so this pushed with no ask.
+    'git -C x subtree push -P p origin feat',
+    'git --git-dir /r/.git subtree push --prefix=p origin feat',
   ]) {
     assert.equal(e.evaluate(pre('Bash', { command })).decision, 'ask', command);
   }
