@@ -114,17 +114,22 @@ test('D6. explicit destinations are judged too', (t) => {
   for (const command of ['git push origin feat/x:master', 'git push origin HEAD:refs/heads/production-x', 'git push origin +HEAD:master',
     'git push origin --delete master', 'git push -d origin production-1', 'git push origin :master', 'git push origin master',
     'git push --all origin', 'git push --mirror origin', 'git push --prune origin refs/heads/*:refs/heads/*', 'git push -fu origin HEAD:master',
-    'git push -o ci.skip origin HEAD:master', 'git push --repo=origin origin HEAD:master'])
+    'git push -o ci.skip origin HEAD:master', 'git push --repo=origin origin HEAD:master',
+    'git push origin HEAD:heads/master', 'git push origin heads/master', 'git push origin +feat/x:heads/production-1'])
     assert.equal(decide(e, command, r).decision, 'deny', command);
   for (const command of ['git push origin master:feat/y', 'git push origin refs/tags/master', 'git push --tags origin', 'git push origin feat/x',
-    'git push --delete origin feat/old', 'git push -o master origin feat/x', 'git push origin HEAD:feat/master'])
+    'git push --delete origin feat/old', 'git push -o master origin feat/x', 'git push origin HEAD:feat/master',
+    'git push origin tags/master', "git push -o 'x -n y' origin feat/x"])
     assert.equal(decide(e, command, r).decision, 'allow', command);
 });
 
 test('D7. a dry run publishes nothing, so it is not a destination', (t) => {
   const { e } = engine(t);
-  for (const command of ['git push --dry-run', 'git push -n origin HEAD', 'git push -nf origin master'])
+  for (const command of ['git push --dry-run', 'git push -n origin HEAD', 'git push -nf origin master', 'git push --no-dry-run --dry-run'])
     assert.equal(decide(e, command, repo(t)).decision, 'allow', command);
+  // --no-dry-run cancels an earlier -n / --dry-run (Dwight, HAG-50).
+  for (const command of ['git push --dry-run --no-dry-run', 'git push -n --no-dry-run origin HEAD', "git push -o 'x -n y' origin HEAD"])
+    assert.equal(decide(e, command, repo(t)).decision, 'deny', command);
 });
 
 test('D8. the repo is the one the push runs in: -C, cd, and wrappers', (t) => {
@@ -142,7 +147,8 @@ test('D9. when git cannot say where a push goes, the rule fails closed (on_error
   const r = repo(t, { branch: 'feat/x' });
   const { e, rows } = engine(t);
   for (const command of ['GIT_DIR=/elsewhere/.git git push origin HEAD', 'export GIT_CONFIG_PARAMETERS=x; git push', 'cd $X && git push',
-    'git push --frobnicate origin HEAD', 'git --namespace=n push origin HEAD', 'git push $R HEAD', 'git push origin $B']) {
+    'git push --frobnicate origin HEAD', 'git --namespace=n push origin HEAD', 'git push $R HEAD', 'git push origin $B',
+    'git push origin {feat,master}', 'git push origin feat/{1..3}']) {
     const v = decide(e, command, r);
     assert.equal(v.decision, 'deny', command);
     assert.equal(v.matchedOn, 'error', command);

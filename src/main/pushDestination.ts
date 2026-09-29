@@ -64,7 +64,11 @@ const SHORT = new Set(['v', 'q', 'n', 'f', 'u', 'd', '4', '6']);
 const RELEVANT_KEY = /^(push|remote|branch)\./i;
 
 const unreadable = (why: string): never => { throw new Error(`push destination unknown: ${why}`); };
-const noVar = (w: string, what: string) => { if (w.includes('$')) unreadable(`${what} holds a variable (${w})`); };
+const noVar = (w: string, what: string) => {
+  if (w.includes('$')) unreadable(`${what} holds a variable (${w})`);
+  // The parser does not expand braces: {feat,master} is two refspecs to the shell.
+  if (/\{[^}]*(?:,|\.\.)[^}]*\}/.test(w)) unreadable(`${what} uses brace expansion (${w})`);
+};
 
 /**
  * The branches a parsed git command would push to, or null when it is not a push
@@ -104,13 +108,15 @@ export function pushTargets(argv: string[], cwd: string | null, git: PushGit = r
   }
   if (argv[i] !== 'push') return null;
 
-  let mirror = false, all = false, del = false, prune = false, repoOpt: string | null = null;
+  let mirror = false, all = false, del = false, prune = false, dry = false, repoOpt: string | null = null;
   const pos: string[] = [];
   for (i++; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--') { pos.push(...argv.slice(i + 1)); break; }
     if (!a.startsWith('-') || a === '-') { pos.push(a); continue; }
-    if (a === '--dry-run') return null;
+    // The last of -n / --dry-run / --no-dry-run wins, as in git (Dwight, HAG-50).
+    if (a === '--dry-run') { dry = true; continue; }
+    if (a === '--no-dry-run') { dry = false; continue; }
     if (a.startsWith('--')) {
       if (PUSH_VALUED.has(a)) { const v = argv[++i]; if (a === '--repo') repoOpt = v ?? null; continue; }
       if (PUSH_ATTACHED.test(a)) { if (a.startsWith('--repo=')) repoOpt = a.slice(7); continue; }
@@ -126,10 +132,11 @@ export function pushTargets(argv: string[], cwd: string | null, git: PushGit = r
       const c = a[k];
       if (c === 'o') { if (k === a.length - 1) i++; break; }
       if (!SHORT.has(c)) unreadable(`push option -${c}`);
-      if (c === 'n') return null;
+      if (c === 'n') dry = true;
       if (c === 'd') del = true;
     }
   }
+  if (dry) return null;
   if (mirror || prune) return { any: true }; // both can delete any remote branch
   if (!dir) unreadable('the working directory is unknown');
   for (const w of pos) noVar(w, 'the push');
@@ -155,7 +162,9 @@ export function pushTargets(argv: string[], cwd: string | null, git: PushGit = r
     if (dst.includes('*')) { any = true; return; }
     if (dst === 'HEAD' || dst === '@') { if (cur) out.add(cur); return; }
     if (dst.startsWith('refs/heads/')) out.add(dst.slice('refs/heads/'.length));
-    else if (!dst.startsWith('refs/')) out.add(dst); // a short name: taken as a branch
+    // git also resolves heads/<name> to refs/heads/<name> (Dwight, HAG-50).
+    else if (dst.startsWith('heads/')) out.add(dst.slice('heads/'.length));
+    else if (!/^(?:refs|tags|remotes)\//.test(dst)) out.add(dst); // a short name: taken as a branch
   };
   const split = (spec: string): [string, string | null] => {
     const s = spec.replace(/^\+/, '');
