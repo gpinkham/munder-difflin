@@ -348,6 +348,48 @@ function repairLiteralLineBreaksInJsonStrings(raw: string): { text: string; chan
   return { text, changed };
 }
 
+/**
+ * The `kind` the cth-hook shim writes when it fails open (md-222). Named here because
+ * the READER below has to collapse exactly the rows that writer produces; the writer
+ * spells it inside the shim template, and a test pins the two together.
+ */
+export const POLICY_TRANSPORT_FAILOPEN = 'policy-transport-failopen';
+
+/**
+ * `log.jsonl` rows as god's heartbeat digest reads them: the newest `limit` rows, one
+ * JSON per line, with every `policy-transport-failopen` collapsed into a single leading
+ * count line (HAG-30 / md-224).
+ *
+ * WHY THE COLLAPSE. The fail-open row is written per hook call, so a transport outage on
+ * a busy floor fills the window in seconds. The digest shows eight rows; eight fail-opens
+ * are eight rows, and the message, spawn and task rows god reads the digest FOR are gone —
+ * an outage evicting the signal needed to notice anything else. One line says as much.
+ *
+ * WHY NOT AN EXCLUSION. md-222's whole point was that a silent fail-open cost an
+ * investigation (md-220), so dropping the rows here would re-create that silence one layer
+ * up. The count and the newest row's `reason` stay, which is what a reader acts on.
+ *
+ * READ SIDE ONLY. Nothing about the shim changes: every call still writes its row, and
+ * `<hive>/log.jsonl` is still the complete record for `jq`. This is how one consumer reads
+ * it. A row without a `kind`, and a `{ raw }` row `logTail` hands back for a line that
+ * would not parse, are signal and pass through untouched — they are the only evidence of
+ * themselves. A row that will not serialise costs its own line and nothing else.
+ */
+export function activityLog(rows: unknown[], limit: number): string {
+  const isFailopen = (r: unknown): boolean =>
+    !!r && typeof r === 'object' && (r as { kind?: unknown }).kind === POLICY_TRANSPORT_FAILOPEN;
+  const json = (r: unknown): string => { try { return JSON.stringify(r) ?? ''; } catch { return ''; } };
+  const failopens = rows.filter(isFailopen);
+  const kept = rows.filter((r) => !isFailopen(r)).slice(-limit).map(json).filter(Boolean);
+  if (!failopens.length) return kept.join('\n');
+  // Newest, not oldest: an outage's current reason is the one worth acting on, and the
+  // shim's row carries reason/agent/tool/answered, so one row is a usable report.
+  const newest = json(failopens[failopens.length - 1]);
+  const note = `— ${POLICY_TRANSPORT_FAILOPEN} ×${failopens.length} collapsed`
+    + (newest ? ` (newest: ${newest})` : '');
+  return [note, ...kept].join('\n');
+}
+
 export class HiveManager {
   /**
    * @param getHome  Lazily resolve harnessHome so the hive follows config changes.
