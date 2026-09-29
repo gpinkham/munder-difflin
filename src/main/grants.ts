@@ -16,9 +16,11 @@
  *
  * v1 GRAMMAR, deliberately narrow. Exactly one form can be granted:
  *   git [-C <dir>] push [-u|--set-upstream] <remote> <40-hex sha>:refs/heads/<branch>
- * and only when it is the WHOLE Bash call. The sha is in the command, so the engine
- * compares strings and never resolves what a branch points to. The remote is judged
- * by its URL, resolved at evaluation, because a remote NAME can be re-pointed.
+ * and only when it is the WHOLE Bash call and starts with git itself. The sha is in the
+ * command, so the engine compares strings and never resolves what a branch points to.
+ * The remote is judged by its PUSH url, resolved at evaluation, because a remote NAME
+ * can be re-pointed (set-url, pushurl, pushInsteadOf). A repo that would push
+ * submodules or tags along with the ref is refused.
  * Anything else — force, --all, --tags, --delete, more than one refspec, a compound
  * call, gh, curl, an alias — cannot be granted and keeps asking.
  */
@@ -70,16 +72,42 @@ export interface GrantRequest {
   requested_at: string;
 }
 
-/** Resolves a remote NAME to its URL in a directory; null when it cannot. */
-export type RemoteResolver = (dir: string, remote: string) => string | null;
+/** What the grant check needs to know about the repo a push runs in. */
+export interface GitInspector {
+  /** Where `git push <remote>` would actually send, or null when it cannot tell. */
+  pushUrl(dir: string, remote: string): string | null;
+  /** Why one approved push could publish more than its ref, or null when it cannot. */
+  pushRisk(dir: string): string | null;
+}
 
-export const gitRemoteResolver: RemoteResolver = (dir, remote) => {
-  try {
-    const out = execFileSync('git', ['-C', dir, 'remote', 'get-url', remote], { timeout: 2000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    return out.trim() || null;
-  } catch {
-    return null;
-  }
+const git = (dir: string, args: string[]) =>
+  execFileSync('git', ['-C', dir, ...args], { timeout: 2000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+
+export const gitInspector: GitInspector = {
+  // --push: the PUSH url, after pushurl and pushInsteadOf, which is where git push goes.
+  // Without it the fetch url was checked, and a pushurl in the repo's own config sent an
+  // approved push somewhere else (Dwight, HAG-49 H1).
+  pushUrl(dir, remote) {
+    try { return git(dir, ['remote', 'get-url', '--push', remote]) || null; } catch { return null; }
+  },
+  pushRisk(dir) {
+    const get = (key: string): string | null => {
+      try { return git(dir, ['config', '--get', key]); } catch (e) {
+        // Exit 1 is "not set". Anything else means the config could not be read: refuse.
+        if ((e as { status?: number }).status === 1) return null;
+        throw e;
+      }
+    };
+    try {
+      const sub = (get('push.recurseSubmodules') ?? '').toLowerCase();
+      if (sub && sub !== 'no' && sub !== 'check' && sub !== 'false') return `push.recurseSubmodules is ${sub}, so the push would also publish submodule commits`;
+      const tags = (get('push.followTags') ?? '').toLowerCase();
+      if (tags === 'true' || tags === 'yes' || tags === 'on' || tags === '1') return 'push.followTags is on, so the push would also publish tags';
+      return null;
+    } catch {
+      return 'the repository config could not be read';
+    }
+  },
 };
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -91,8 +119,12 @@ const no = (why: string) => ({ ok: false as const, why });
  * The canonical action a Bash command performs, or the reason it cannot be granted.
  * `cwd` is where the agent's shell is; a `-C <dir>` in the command overrides it.
  */
-export function canonicalAction(command: string, cwd: string | null | undefined, resolve: RemoteResolver = gitRemoteResolver):
+export function canonicalAction(command: string, cwd: string | null | undefined, inspect: GitInspector = gitInspector):
   { ok: true; action: CanonicalAction } | { ok: false; why: string } {
+  // The RAW command must be git itself: the parser strips env assignments and
+  // wrappers, and `GIT_CONFIG_COUNT=1 … git push` or `env GIT_DIR=… git push` changes
+  // where the push goes without changing what the parser sees (Dwight, HAG-49 H1).
+  if (!/^git\s/.test(command.trim())) return no('the command must start with git itself: no environment assignments, env, bash -c or other wrapper in front');
   let cmds;
   try { cmds = effectiveCommands(command, cwd ?? undefined); } catch { return no('the command could not be parsed'); }
   if (cmds.length !== 1) return no('only a single command can be approved; run the push on its own (use git -C <dir> instead of cd)');
@@ -117,8 +149,10 @@ export function canonicalAction(command: string, cwd: string | null | undefined,
   if (!m || !SHA.test(m[1])) return no('the refspec must be a full 40-character commit sha, a colon, and refs/heads/<branch>');
   if (!BRANCH.test(m[3])) return no('the branch name is not one that can be approved');
   if (!dir) return no('the working directory is unknown, so the remote cannot be resolved');
-  const url = resolve(dir, remote);
-  if (!url) return no(`the remote "${remote}" could not be resolved to a URL in ${dir}`);
+  const url = inspect.pushUrl(dir, remote);
+  if (!url) return no(`the remote "${remote}" could not be resolved to a push URL in ${dir}`);
+  const risk = inspect.pushRisk(dir);
+  if (risk) return no(`one approved push would publish more than the approved ref: ${risk}`);
   const target = { remote_url: url, ref: m[2], sha: m[1] };
   return ok({ class: 'git-push', target, summary: `Push ${m[3]} at ${m[1].slice(0, 8)} to ${url}` });
 }
@@ -203,13 +237,13 @@ export class GrantStore {
 export class GrantDesk {
   private pendingById = new Map<string, GrantRequest>();
 
-  constructor(private store: GrantStore, private resolve: RemoteResolver = gitRemoteResolver) {}
+  constructor(private store: GrantStore, private inspect: GitInspector = gitInspector) {}
 
   request(agentId: string, input: { command?: unknown; cwd?: unknown; reason?: unknown }, now = Date.now()):
     { ok: true; request: GrantRequest } | { ok: false; why: string } {
     if (typeof input.command !== 'string' || !input.command.trim()) return { ok: false, why: 'the request has no command' };
     const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : null;
-    const c = canonicalAction(input.command, cwd, this.resolve);
+    const c = canonicalAction(input.command, cwd, this.inspect);
     if (!c.ok) return c;
     const request: GrantRequest = {
       id: newId('r'), agent_id: agentId, command: input.command, cwd,

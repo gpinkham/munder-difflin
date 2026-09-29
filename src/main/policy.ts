@@ -44,7 +44,7 @@
 import { readFileSync, existsSync, appendFileSync, readdirSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { canonicalAction, GrantStore, GRANT_CLASSES, gitRemoteResolver, type Grant, type RemoteResolver } from './grants';
+import { canonicalAction, GrantStore, GRANT_CLASSES, gitInspector, type Grant, type GitInspector } from './grants';
 import {
   effectiveCommands, realAbsolute, inlineScript, scriptLiterals, scriptWrites, operandsOf, verbOf,
   STRUCTURAL_UNRESOLVED, type EffectiveCommand, type Unresolved,
@@ -385,8 +385,8 @@ export class PolicyEngine {
      *  evaluation that needs it, because agents are spawned and archived while the
      *  daemon runs. Optional: without it that matcher never fires. */
     private workspaces: () => AgentWorkspace[] = () => [],
-    /** How a git remote name becomes a URL, for grants. Injected by tests. */
-    private remoteResolver: RemoteResolver = gitRemoteResolver
+    /** How the grant check reads a repo (push url, push risks). Injected by tests. */
+    private gitInspect: GitInspector = gitInspector
   ) {
     this.policyDir = hiveRoot ? join(hiveRoot, 'policy') : '';
     this.policyPath = this.policyDir ? join(this.policyDir, ENGINE_POLICY_FILE) : '';
@@ -807,7 +807,7 @@ export class PolicyEngine {
     try {
       const input = (p.tool_input ?? {}) as Record<string, unknown>;
       if (p.tool_name !== 'Bash' || typeof input.command !== 'string') return null;
-      const c = canonicalAction(input.command, p.cwd, this.remoteResolver);
+      const c = canonicalAction(input.command, p.cwd, this.gitInspect);
       if (!c.ok || !rule.grantable!.includes(c.action.class)) return null;
       return this.grants().findUsable(p.agent_id, c.action);
     } catch {

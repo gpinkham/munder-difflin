@@ -255,12 +255,17 @@ It is **off unless a rule lists `grantable`**. It is valid only on an `ask` rule
 
 What a grant covers, and nothing more:
 - **Class:** `git-push`, and only `git [-C <dir>] push [-u] <remote> <40-char sha>:refs/heads/<branch>`
-  as the whole Bash call. Force, `--all`, `--tags`, `--delete`, several refspecs,
-  `cd … && git push`, gh, curl and aliases can never be granted, and they keep
-  asking.
-- **Target:** the remote's URL, which is resolved when the push runs, so re-pointing
-  `origin` breaks the match. Also the ref, and the sha, which is written in the
-  command, so a new commit needs a new approval.
+  as the whole Bash call, **starting with `git` itself**. Nothing may come in front:
+  an environment assignment (`GIT_CONFIG_*=… git push`), `env`, `bash -c` or an
+  absolute path can each change where the push goes without changing what the parser
+  sees. Force, `--all`, `--tags`, `--delete`, several refspecs, `cd … && git push`,
+  gh, curl and aliases can never be granted, and they keep asking.
+- **Target:** the remote's **push** URL (`git remote get-url --push`, after `pushurl`
+  and `pushInsteadOf`), resolved when the push runs, so re-pointing `origin` in any of
+  those ways breaks the match. Also the ref, and the sha, which is written in the
+  command, so a new commit needs a new approval. A repo whose config would publish
+  more than that ref (`push.followTags`, `push.recurseSubmodules` other than `check`
+  or `no`) cannot be granted at all.
 - **Who:** the one agent that asked.
 - **When:** 60 minutes from approval. After the first use, the identical push may be
   retried within 10 minutes (a network failure, say); after that the grant is spent.
@@ -276,6 +281,14 @@ grant writes a `policy-decision` row with `decision: "allow"` and the `grant_id`
 
 **Ship the engine before the pack.** An engine older than this feature rejects a rule
 with `grantable`, and one rejected rule unloads the whole file.
+
+**Keep deny rules ahead of a grantable ask.** Rules are first-match, so a grant on an
+earlier ask rule returns allow before a later rule is looked at.
+
+Known residuals: git configuration set outside the repo and the command (global
+config, or a variable the agent's shell already exported) is not inspected, and
+the push URL check runs `git remote get-url` from the app in a directory the agent
+names (it runs no hooks or helpers).
 
 ## Why JSON and not YAML
 

