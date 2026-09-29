@@ -131,6 +131,24 @@ an agent that can edit the policy file makes every rule advisory:
    none, because it is believed. One invalid rule rejects the whole file for the
    same reason.
 
+## Denying a pull-request merge (`bitbucket-merge`)
+
+For a floor whose agents hold a token that can merge (the operator's own, say),
+the forge cannot stop them, so the pack denies a Bitbucket merge by CLI (`bb`/`bkt
+pr merge`), by REST (Cloud `…/pullrequests/<id>/merge`, Server/DC
+`…/pull-requests/<id>/merge`) and by inline script. Two things to know:
+
+- **It ships `dry_run`, which blocks nothing.** It logs `would_deny`. Where it is the
+  only control, set its `mode` to `live`.
+- **A merge can be disguised as a push.** `git push origin feature:main` puts the same
+  commits on `main` and is only *asked* about by `remote-push`. Read that prompt as a
+  possible merge. Branch permissions on the default branch remain the real control.
+- **MCP tools** are seen by exact name only (the `tool` matcher). Add the server's
+  merge tool names to a deny rule. A generic request tool (method + path) cannot be
+  separated from a read by name.
+
+Keep deny rules ahead of any `ask` rule: rules are first-match.
+
 ## Enforcement reach
 
 A decision only takes effect if the harness bridge reads the response back. As

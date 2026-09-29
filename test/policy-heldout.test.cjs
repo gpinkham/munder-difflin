@@ -222,7 +222,17 @@ test('H3. every way of merging a Bitbucket pull request is denied, by bitbucket-
     "wget --method=POST https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/12/merge",
     "wget --post-data='' https://bitbucket.corp.example/rest/api/1.0/projects/P/repos/r/pull-requests/12/merge",
     "python3 -c \"import requests; requests.post('https://api.bitbucket.org/2.0/repositories/ws/r/pullrequests/1/merge')\"",
-    "node -e \"fetch('https://bitbucket.corp.example/rest/api/1.0/projects/P/repos/r/pull-requests/1/merge',{method:'POST'})\""
+    "node -e \"fetch('https://bitbucket.corp.example/rest/api/1.0/projects/P/repos/r/pull-requests/1/merge',{method:'POST'})\"",
+    // Dwight's review of 9dd286aa: clustered curl flags, a flag with a value, case, slashes, urllib data=.
+    "curl -sSd '{}' https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/7/merge",
+    "curl -sSF x=y https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/7/merge",
+    "bb pr --repo w/r merge 7",
+    "bb pr -R w/r merge 7",
+    "BB pr merge 7",
+    "Bkt pr merge 7",
+    "curl -XPOST https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/7/merge/",
+    "curl -XPOST https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/7//merge",
+    "python3 -c \"import urllib.request as u; u.urlopen('https://api.bitbucket.org/2.0/repositories/ws/r/pullrequests/1/merge', data=b'{}')\""
   ]) {
     const v = e.evaluate(pre('Bash', { command }));
     assert.equal(v.decision, 'deny', command);
@@ -252,6 +262,9 @@ test('H3b. ordinary pull-request work and reads of the merge endpoint are not de
     "echo 'never run bb pr merge'",
     "grep -rn 'pullrequests/12/merge' notes.md",
     "http https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/12/diff",
+    "curl -sSf https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/7/merge/task-status/t",
+    "curl -fsSL https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/7",
+    "bb pr list --state MERGED --repo w/r",
     // Polling a merge that someone else started: names the endpoint and says "post", but is not /merge itself.
     "node -e \"fetch('https://api.bitbucket.org/2.0/repositories/ws/r/pullrequests/1/merge/task-status/t').then((r) => r.json()).then((j) => console.log('post-merge status', j.task_status))\""
   ]) {
