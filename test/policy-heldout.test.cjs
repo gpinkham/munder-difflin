@@ -190,3 +190,80 @@ test('H2b. GAP: a report that says green after a red run is flagged',
     redRunThenGreenReport(e, root);
     assert.ok(rows.some((r) => r.kind === 'report-contradicts-log'));
   });
+
+// --- H3. Merging a pull request is the operator's (Bitbucket, 2026-09-29) ------------
+//
+// On a floor that uses the operator's own Bitbucket token, nothing on the Bitbucket
+// side can stop an agent merging, so the pack denies it. Each shape is one way an
+// agent could merge; each neighbour is ordinary PR work that must still pass.
+
+test('H3. every way of merging a Bitbucket pull request is denied, by bitbucket-merge', () => {
+  const { e } = shipped();
+  for (const command of [
+    "bb pr merge 12",
+    "bb pr merge",
+    "bb pr merge --close-source-branch 12",
+    "bb pr merge 12 --close-source-branch",
+    "bb --repo ws/r pr merge 12",
+    "bash -c 'bb pr merge 12'",
+    "env BB_TOKEN=x bb pr merge 12",
+    "sh -c \"bb pr merge 3\"",
+    "cd /r && bb pr merge 4",
+    "/usr/local/bin/bb pr merge 5",
+    "bkt pr merge 7",
+    "curl -X POST -u u:t https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/12/merge",
+    "curl -XPOST https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/12/merge",
+    "curl --request post https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/12/merge",
+    "curl -d '{\"merge_strategy\":\"squash\"}' https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/12/merge",
+    "curl -H 'Content-Type: application/json' --data @m.json \"https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/$PR/merge\"",
+    "curl -X POST https://bitbucket.corp.example/rest/api/1.0/projects/P/repos/r/pull-requests/12/merge?version=3",
+    "http POST https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/12/merge",
+    "http https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/12/merge merge_strategy=squash",
+    "wget --method=POST https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/12/merge",
+    "wget --post-data='' https://bitbucket.corp.example/rest/api/1.0/projects/P/repos/r/pull-requests/12/merge",
+    "python3 -c \"import requests; requests.post('https://api.bitbucket.org/2.0/repositories/ws/r/pullrequests/1/merge')\"",
+    "node -e \"fetch('https://bitbucket.corp.example/rest/api/1.0/projects/P/repos/r/pull-requests/1/merge',{method:'POST'})\""
+  ]) {
+    const v = e.evaluate(pre('Bash', { command }));
+    assert.equal(v.decision, 'deny', command);
+    assert.equal(v.ruleId, 'bitbucket-merge', command);
+  }
+});
+
+test('H3b. ordinary pull-request work and reads of the merge endpoint are not denied', () => {
+  const { e } = shipped();
+  for (const command of [
+    "bb pr create --title 'merge fix' --source feat/x",
+    "bb pr create -t merge",
+    "bb pr list --state MERGED",
+    "bb pr view 12",
+    "bb pr diff 12",
+    "bb pr comments 12",
+    "bb pr checkout 12",
+    "git push origin feat/x",
+    "git merge main",
+    "git push -u origin HEAD",
+    "curl https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/12",
+    "curl https://bitbucket.corp.example/rest/api/1.0/projects/P/repos/r/pull-requests/12/merge",
+    "curl -X GET https://bitbucket.corp.example/rest/api/1.0/projects/P/repos/r/pull-requests/12/merge",
+    "curl https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/12/merge/task-status/abc",
+    "curl -X POST -d '{\"content\":{\"raw\":\"lgtm\"}}' https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/12/comments",
+    "curl -X POST https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests -d @pr.json",
+    "echo 'never run bb pr merge'",
+    "grep -rn 'pullrequests/12/merge' notes.md",
+    "http https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/12/diff",
+    // Polling a merge that someone else started: names the endpoint and says "post", but is not /merge itself.
+    "node -e \"fetch('https://api.bitbucket.org/2.0/repositories/ws/r/pullrequests/1/merge/task-status/t').then((r) => r.json()).then((j) => console.log('post-merge status', j.task_status))\""
+  ]) {
+    // Not denied, and not by this rule. A push still asks under remote-push: that is
+    // remote-push's business, not a merge.
+    const v = e.evaluate(pre('Bash', { command }));
+    assert.notEqual(v.decision, 'deny', command);
+    assert.notEqual(v.ruleId, 'bitbucket-merge', command);
+  }
+});
+
+test('H3c. GAP: a merge made by a script file is not seen', { todo: 'the engine reads the command, not the script it runs' }, () => {
+  const { e } = shipped();
+  assert.equal(e.evaluate(pre('Bash', { command: 'python3 scripts/merge_pr.py 12' })).decision, 'deny');
+});

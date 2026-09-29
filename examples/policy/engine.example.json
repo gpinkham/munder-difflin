@@ -10,7 +10,7 @@
     "behaves exactly as it did before this feature existed - nothing evaluated,",
     "nothing logged, nothing denied.",
     "",
-    "Four rules. The fourth (cross-agent-workspace) was that decision, taken on",
+    "Five rules. The fourth (cross-agent-workspace) was that decision, taken on",
     "an observed incident (md-216), not added as a detail. By the tenth, adopt a",
     "real policy engine (OPA/Rego) instead of growing the matcher vocabulary here.",
     "",
@@ -94,6 +94,20 @@
         "command_matches": "^mempalace +(sync|repair)( +-\\S+.*)?$"
       },
       "reason": "mempalace sync deletes every per-agent wing and cannot be undone. To record something, append to your own memory.md - it is mined automatically. If a palace really needs repairing, ask the operator."
+    },
+    {
+      "id": "bitbucket-merge",
+      "description": "Merging a pull request is the operator's call, and on a floor that shares the operator's Bitbucket token nothing on the Bitbucket side can stop it.",
+      "decision": "deny",
+      "mode": "dry_run",
+      "on_error": "deny",
+      "_on_error_why": "Fails closed, like destructive-shared-state: a merge lands on the shared branch and is not undone by the agent that did it, while a refused command costs one retry.",
+      "_match_why": "A DENY, not an ask and not grantable: the operator merges, full stop. Covered, each judged per PARSED command so wrappers (bash -c, sh -c, env, cd x &&, an absolute path) arrive as the bare invocation: (1) the bb / bkt CLIs, `bb [global flags] pr [flags] merge [n] [--close-source-branch]` (bb has no alias for merge); (2) a write to a merge endpoint, Bitbucket Cloud `…/pullrequests/<id>/merge` or Server/Data Center `…/pull-requests/<id>/merge`, by curl (-X/--request POST in any case, or a body: -d, --data*, --json, -F, --form), httpie/xh (POST, or a key=value data item, which makes it a POST) or wget (--method POST, --post-data, --post-file); (3) python/node/ruby/perl given inline code that names a merge endpoint and says post. The endpoint must end at /merge, so `…/merge/task-status/<id>` and every other PR endpoint pass, and a GET on the Server merge endpoint (it answers 'can this merge?') passes too. NOT COVERED: a script FILE that makes the call (python merge.py), an HTTP client this list does not name, a URL assembled at run time from pieces, and merge-by-push (a local merge pushed to the default branch: that is a push, see remote-push). MCP tools are separate tool calls the engine does see, by exact tool name only: add a rule with `tool: [<the Atlassian MCP merge tool names>]` if the floor has one. The server-side control is the real fix where the agents' token allows it; this is the layer for when it does not.",
+      "match": {
+        "tool": "Bash",
+        "command_matches": "^(?:(?:bb|bkt)(?:\\s+\\S+)*?\\s+pr\\s+(?:-\\S+\\s+)*merge(?:\\s|$)|(?=.*(?:pullrequests|pull-requests)/[^/\\s'\"]+/merge(?![\\w/-]))(?:curl\\b(?=.*(?:-X\\s*(?:[Pp][Oo][Ss][Tt])\\b|--request[\\s=]+(?:[Pp][Oo][Ss][Tt])\\b|\\s(?:-d|--data\\S*|--json\\b|-F|--form\\S*)))|(?:http|https|xh)\\b(?=.*(?:\\s(?:[Pp][Oo][Ss][Tt])\\s|\\s[\\w.-]+:?=))|wget\\b(?=.*(?:--method[\\s=]+(?:[Pp][Oo][Ss][Tt])\\b|--post-(?:data|file)\\b))|(?:python3?|node|ruby|perl)\\b(?=.*(?:[Pp][Oo][Ss][Tt]))))"
+      },
+      "reason": "Merging a pull request is the operator's decision. Leave the PR open, report its link, and say it is ready to merge."
     },
     {
       "id": "remote-push",

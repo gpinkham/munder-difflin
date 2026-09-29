@@ -59,15 +59,15 @@ test('hook-schema authority.json alone: 0 rules, a status row, and god is told',
   assert.ok(st.error);
 });
 
-test('engine.json beside it: rules loaded 4, no message to god', async (t) => {
+test('engine.json beside it: rules loaded 5, no message to god', async (t) => {
   const { server, logRows, godInbox } = await floor(t, { 'authority.json': HOOK_SCHEMA, 'engine.json': PACK() });
   server.announcePolicy();
   const status = logRows().find((r) => r.kind === 'policy-status');
-  assert.equal(status.rules_loaded, 4);
+  assert.equal(status.rules_loaded, 5);
   assert.equal(status.error, null);
   assert.equal(logRows().filter((r) => r.kind === 'policy-load-failed').length, 0);
   assert.equal(godInbox().filter((m) => /Guardrail/.test(m.subject)).length, 0);
-  assert.deepEqual(server.policyStatus().ruleIds, ['cross-agent-write', 'cross-agent-workspace', 'destructive-shared-state', 'remote-push']);
+  assert.deepEqual(server.policyStatus().ruleIds, ['cross-agent-write', 'cross-agent-workspace', 'destructive-shared-state', 'bitbucket-merge', 'remote-push']);
 });
 
 test('no policy at all: silent, as before', async (t) => {
@@ -233,7 +233,7 @@ test('md-223: the startup status row says which roots are live and which were dr
   const status = logRows().find((r) => r.kind === 'policy-status');
   assert.deepEqual(status.workspace_roots, ['code-worktrees']);
   assert.deepEqual(status.workspace_roots_rejected.map((r) => r.root), ['..', '']);
-  assert.equal(status.rules_loaded, 4, 'a bad root never blocks the policy from loading');
+  assert.equal(status.rules_loaded, 5, 'a bad root never blocks the policy from loading');
 });
 
 test('md-223 N1: a forged registry id cannot steal a colleague\'s checkout or own outside the harness',

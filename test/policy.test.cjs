@@ -397,7 +397,7 @@ function shipped() {
 test('12. the shipped pack loads with every rule valid', () => {
   const e = shipped();
   assert.equal(e.error, null);
-  assert.equal(e.ruleCount, 4);
+  assert.equal(e.ruleCount, 5);
 });
 
 test('12a. a disguised mempalace sync is denied however it is spelled', () => {
@@ -1250,13 +1250,13 @@ test('21b. engine.json beside the hook file loads, and authority.json is never w
   const { e, rows, root } = hiveWith({ 'authority.json': HOOK_SCHEMA, 'engine.json': pack });
   const before = fs.readFileSync(path.join(root, 'policy', 'authority.json'), 'utf8');
   assert.equal(e.error, null);
-  assert.equal(e.ruleCount, 4);
+  assert.equal(e.ruleCount, 5);
   const st = e.status;
   assert.ok(st.file.endsWith('engine.json'));
-  assert.deepEqual(st.ruleIds, ['cross-agent-write', 'cross-agent-workspace', 'destructive-shared-state', 'remote-push']);
+  assert.deepEqual(st.ruleIds, ['cross-agent-write', 'cross-agent-workspace', 'destructive-shared-state', 'bitbucket-merge', 'remote-push']);
   assert.ok(st.loadedAt);
   const loaded = rows.find((r) => r.kind === 'policy-loaded');
-  assert.equal(loaded.rules_loaded, 4);
+  assert.equal(loaded.rules_loaded, 5);
   assert.equal(rows.filter((r) => r.kind === 'policy-load-failed').length, 0);
   assert.equal(fs.readFileSync(path.join(root, 'policy', 'authority.json'), 'utf8'), before);
 });
@@ -1268,7 +1268,7 @@ test('21c. every rule in the shipped pack is dry_run', () => {
 test('21d. an engine-schema authority.json with no engine.json still loads (pre-md-216 installs)', () => {
   const { e } = hiveWith({ 'authority.json': PACK() });
   assert.equal(e.error, null);
-  assert.equal(e.ruleCount, 4);
+  assert.equal(e.ruleCount, 5);
 });
 
 test('21e. with engine.json present, a broken engine.json fails even if authority.json is fine', () => {
