@@ -66,6 +66,39 @@ test('one fail-open is still collapsed, so the digest has one shape to read', ()
   assert.ok(out[1].includes('"from":"kelly"'));
 });
 
+test('an outage that is OVER heads nothing — the count is scoped to the rows we print', () => {
+  // Dwight's D2. Scanning 200 rows to find 8 real ones means a fail-open from an outage
+  // that ended hours ago is still in `rows`. Counting it printed a leading banner above
+  // eight current rows, asserting an outage that is not happening — a NEW false alarm in
+  // the one channel md-222 built to be honest, and sticky for days on a quiet floor. The
+  // failure mode is the mirror of md-220: god chases a resolved outage instead of missing
+  // a live one.
+  const resolved = [...Array.from({ length: 40 }, (_, i) => failopen(i, 'socket_error')),
+    ...Array.from({ length: 8 }, (_, i) => msg(9000 + i, 'kelly'))];
+  const out = lines(activityLog(resolved, 8));
+  assert.equal(out.length, 8, 'eight real rows and no banner');
+  assert.equal(out.some((l) => l.includes(POLICY_TRANSPORT_FAILOPEN)), false,
+    'every one of those fail-opens is older than every row shown');
+});
+
+test('a new fail-open after that window is counted once, not forty-one times', () => {
+  const rows = [...Array.from({ length: 40 }, (_, i) => failopen(i, 'timeout')),
+    ...Array.from({ length: 8 }, (_, i) => msg(100 + i, 'kelly')),
+    failopen(999, 'socket_error')];
+  const out = lines(activityLog(rows, 8));
+  assert.match(out[0], /\u00d71\b/, 'the live outage, not the history');
+  assert.ok(out[0].includes('"reason":"socket_error"'));
+  assert.equal(out.length, 9, 'one banner plus the eight real rows');
+});
+
+test('an outage that really did fill the log still counts every row of it', () => {
+  // With no real row anywhere in the scan there is no window to be inside, so the
+  // window-scoping must NOT collapse this case to zero — it is the case HAG-30 exists for.
+  const out = lines(activityLog(Array.from({ length: 200 }, (_, i) => failopen(i)), 8));
+  assert.equal(out.length, 1, 'one line, not eight blanks');
+  assert.match(out[0], /\u00d7200\b/);
+});
+
 test('a row the parser could not read is signal, not noise, and is never dropped', () => {
   // logTail hands back `{raw: <line>}` for a line that would not parse, and a row may
   // carry no `kind` at all. Dropping either would lose the only evidence of it.

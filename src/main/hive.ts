@@ -379,8 +379,17 @@ export function activityLog(rows: unknown[], limit: number): string {
   const isFailopen = (r: unknown): boolean =>
     !!r && typeof r === 'object' && (r as { kind?: unknown }).kind === POLICY_TRANSPORT_FAILOPEN;
   const json = (r: unknown): string => { try { return JSON.stringify(r) ?? ''; } catch { return ''; } };
-  const failopens = rows.filter(isFailopen);
-  const kept = rows.filter((r) => !isFailopen(r)).slice(-limit).map(json).filter(Boolean);
+  const real = rows.map((r, i) => ({ r, i })).filter(({ r }) => !isFailopen(r));
+  const window = real.slice(-limit);
+  // Count only the fail-opens inside the window we PRINT. Scanning 200 rows to find 8 real
+  // ones means a fail-open from an outage that ENDED hours ago is still in `rows`; counting
+  // it would head every digest with an outage banner until it scrolled out, which is a false
+  // alarm in the one channel md-222 built to be honest. With no real row in the scan at all
+  // there is no window to be inside, so every fail-open counts — that is case E, the outage
+  // that really did fill the log.
+  const from = window.length ? window[0].i : 0;
+  const failopens = rows.filter((r, i) => isFailopen(r) && i >= from);
+  const kept = window.map(({ r }) => json(r)).filter(Boolean);
   if (!failopens.length) return kept.join('\n');
   // Newest, not oldest: an outage's current reason is the one worth acting on, and the
   // shim's row carries reason/agent/tool/answered, so one row is a usable report.
