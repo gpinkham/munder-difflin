@@ -14,7 +14,7 @@ import { createServer, type Server } from 'node:net';
 import { existsSync, rmSync } from 'node:fs';
 import { isAbsolute, join, normalize } from 'node:path';
 import { Notification, type WebContents } from 'electron';
-import type { HiveManager } from './hive';
+import type { HiveManager, HiveTask, HumanQA } from './hive';
 import type { HarnessConfig } from './config';
 import type { ControlRegistry } from './control';
 import type { CircuitBreaker } from './breaker';
@@ -22,6 +22,14 @@ import { estimateCostUsd } from './pricing';
 import { validateHookEvent } from '../shared/hookEvents';
 import { PolicyEngine, type AgentWorkspace, type PolicyStatus } from './policy';
 import { ReportCheck, REPORT_CHECK_SENDER, type ReportMessage } from './reportCheck';
+
+/** A policy ask counts as the cause of a permission prompt for this long. */
+const POLICY_PROMPT_WINDOW_MS = 60_000;
+/** Events that mean the agent is past the prompt, whichever way it was answered. */
+const ANSWERED_EVENTS = new Set(['PostToolUse', 'PostToolUseFailure', 'UserPromptSubmit', 'Stop', 'SessionStart']);
+function isPermissionPrompt(p: { notification_type?: string; message?: string }): boolean {
+  return p.notification_type === 'permission_prompt' || /needs your permission/i.test(p.message ?? '');
+}
 
 /** Maximum JSON payload bytes in one newline-delimited hook frame. */
 const MAX_HOOK_FRAME_BYTES = 256 * 1024;
@@ -142,6 +150,9 @@ export class HookServer {
   /** The report check (HAG-46), built only when the policy file turns it on.
    *  `undefined` = not decided yet; `null` = off for this daemon's life. */
   private reportChecker: ReportCheck | null | undefined = undefined;
+  /** The last policy `ask` per agent, so the permission prompt it raises can be told
+   *  apart from one Claude raises on its own. Only a loaded policy ever sets it. */
+  private policyAsks = new Map<string, { ruleId: string; at: number; cardId?: string }>();
 
   constructor(
     private hive: HiveManager,
@@ -348,6 +359,39 @@ export class HookServer {
     try { this.reportCheck()?.checkMessage(msg); } catch { /* never affect delivery */ }
   }
 
+  /** Desktop alert plus an ASK ME card for an agent stopped at a policy prompt. */
+  private raisePolicyPrompt(agentId: string, ruleId: string): string {
+    const now = new Date().toISOString();
+    const cardId = `policy-prompt-${agentId}-${Date.now().toString(36)}`;
+    this.notify(agentId, `Waiting on you: rule ${ruleId} asked before a tool call. Answer in ${agentId}'s terminal.`);
+    this.hive.addTask({
+      id: cardId,
+      title: `${agentId} is stopped at a prompt (rule ${ruleId})`,
+      status: 'blocked', dependsOn: [], priority: 1, createdAt: now, assignee: agentId,
+      humanQA: [{
+        q: `**${agentId} is stopped until you answer a permission prompt in its terminal.**\n\nThe policy rule \`${ruleId}\` asked before a tool call. Open ${agentId}'s terminal and choose Yes or No. This card closes itself once the agent moves on.`,
+        askedAt: now,
+        from: agentId,
+      } as HumanQA],
+    } as HiveTask);
+    this.hive.appendLog({ kind: 'policy-prompt-waiting', agent_id: agentId, rule_id: ruleId, card_id: cardId } as Parameters<HiveManager['appendLog']>[0]);
+    return cardId;
+  }
+
+  /** The agent moved on, so the prompt was answered: close its card. */
+  private settlePolicyPrompt(agentId: string): void {
+    const ask = this.policyAsks.get(agentId);
+    if (!ask) return;
+    this.policyAsks.delete(agentId);
+    if (!ask.cardId) return;
+    try {
+      const now = new Date().toISOString();
+      const task = ((this.hive.tasks() as { tasks?: HiveTask[] })?.tasks ?? []).find((t) => t?.id === ask.cardId);
+      const qa = (task?.humanQA ?? []).map((e: HumanQA) => (e.a ? e : { ...e, a: 'Answered in the terminal.', answeredAt: now }));
+      this.hive.patchTask(ask.cardId, { status: 'done', humanQA: qa });
+    } catch { /* best-effort */ }
+  }
+
   stop(): void {
     // Flush the false-positive denominator before the daemon goes away.
     try { this.policy?.flushStats(); } catch { /* noop */ }
@@ -552,6 +596,7 @@ export class HookServer {
           cwd: p.cwd
         });
         if (v.decision !== 'allow') {
+          if (v.decision === 'ask' && agentId && v.ruleId) this.policyAsks.set(agentId, { ruleId: v.ruleId, at: Date.now() });
           this.emit(agentId, event, p);
           return {
             hookSpecificOutput: {
@@ -645,6 +690,18 @@ export class HookServer {
         }
       };
     }
+
+    // A permission prompt that a POLICY ask raised (spike 2026-09-29): in an agent's
+    // own terminal the session stops there until someone answers, and nothing else on
+    // the floor says so. Only an ask the engine returned counts, so with no policy file
+    // (and for Claude's own prompts) this changes nothing.
+    if (event === 'Notification' && agentId && isPermissionPrompt(p)) {
+      const ask = this.policyAsks.get(agentId);
+      if (ask && !ask.cardId && Date.now() - ask.at < POLICY_PROMPT_WINDOW_MS) {
+        try { ask.cardId = this.raisePolicyPrompt(agentId, ask.ruleId); } catch { /* never break a hook */ }
+      }
+    }
+    if (agentId && ANSWERED_EVENTS.has(event)) this.settlePolicyPrompt(agentId);
 
     // A Notification hook that means "the agent is blocked waiting for the user"
     // (idle prompt) deserves a desktop toast too — distinct from a permission
