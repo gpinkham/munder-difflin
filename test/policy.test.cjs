@@ -736,6 +736,34 @@ test('14g. a non-Bash tool, and an unconfigured engine, write nothing', () => {
   assert.equal(inert.rows.length, 0, 'unconfigured stays byte-identical');
 });
 
+test('14h. a destructive git verb is counted in the ledger without becoming a denial', () => {
+  // md-217 N3, made sizeable. These commands destroy a checkout the parser cannot
+  // attribute to a path, which is accepted policy — but before this they produced NO
+  // unresolved row, so `jq 'select(.event=="unresolved")'` could not show the gap's size
+  // or shape. Counting is the whole change; the verdict is the one it always was.
+  const { e, rows, root } = engine([OWN_FOLDER_RULE, MEMPALACE_RULE, PUSH_RULE]);
+  const commands = [
+    'git -C /x/hive/agents/kelly clean -fdx',
+    'git reset --hard origin/main',
+    'git checkout -- .',
+    'git restore .',
+    'git worktree remove --force ../kelly-work'
+  ];
+  for (const command of commands) {
+    const v = e.evaluate(pre('Bash', { command }, 'agent-a'));
+    assert.equal(v.decision, 'allow', `${command} is still allowed — counting is not denying`);
+    const row = rows.filter((r) => r.kind === 'policy-unresolved').at(-1);
+    assert.deepEqual(row.codes, ['destructive_verb'], command);
+  }
+  const onDisk = ledger(root).filter((r) => r.event === 'unresolved' && r.codes.includes('destructive_verb'));
+  assert.equal(onDisk.length, commands.length, 'one row per payload, queryable by code');
+  assert.deepEqual([...new Set(onDisk.flatMap((r) => r.unresolved.map((u) => u.detail)))].sort(),
+    ['git checkout --', 'git clean -f', 'git reset --hard', 'git restore', 'git worktree remove'],
+    'the shape of the gap, not just its size');
+  // No path, and nothing the caller typed, reaches the file.
+  assert.equal(JSON.stringify(onDisk).includes('kelly'), false, 'rows go to a file an operator reads');
+});
+
 // --- 15. Self-protection: the heuristic is scoped to one segment (md-199e) --
 
 test('15. the policy files cannot be written, by any mechanism I could think of', () => {

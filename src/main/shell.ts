@@ -63,7 +63,18 @@ export type UnresolvedCode =
    * hook payload carries `cwd`; a caller that omits it silently gets the behaviour that
    * existed before it was threaded through, and this is what makes that visible instead.
    */
-  | 'missing_cwd';
+  | 'missing_cwd'
+  /**
+   * The verb destroys a checkout at a path it never names — `git clean -fdx`,
+   * `git reset --hard`, `git checkout -- .`, `git restore`, `git worktree remove`.
+   *
+   * These are the md-217 N3 gap: what they delete is the repository the command is
+   * standing in, which is an operand of no rule and a word in no argv, so no ownership
+   * rule can reach them. That gap is accepted policy — but until this code existed the
+   * parser reported them as fully read with zero writes, so the gap could not be sized
+   * from the ledger either. This makes it countable without deciding anything about it.
+   */
+  | 'destructive_verb';
 
 /**
  * Codes that mean the command's STRUCTURE may be wrong — we could not see which program
@@ -755,6 +766,10 @@ function dispatch(argv: string[], redirects: string[], herestring: string | null
   // `git -C dir …` runs in dir; it writes no path we track, but a later command in
   // the same line does not inherit that, so only argv is normalised here.
   const verbWrites = verbTargets(base, argv);
+  // …and when that git command destroys the checkout it is standing in, the path it
+  // destroys is in no operand, so say so rather than report a clean read of zero writes.
+  const destructive = destructiveGitVerb(base, argv);
+  if (destructive) hidden = [...hidden, destructive];
   record(ctx, [base, ...argv.slice(1)], [...redirects, ...verbWrites], hidden, verbWrites, sourceTargets(base, argv));
 }
 
@@ -876,6 +891,85 @@ function findDeleteRoots(argv: string[]): string[] {
   }
   if (!deletes) return [];
   return findSearchRoots(argv).map((r) => (/[/\\]$/.test(r) ? r : r + '/'));
+}
+
+/**
+ * Git's own global flags — the ones that come BEFORE the subcommand. The value table is
+ * load-bearing for the same reason `TRANSPARENT`'s is: `git -C <dir> clean -fdx` is the
+ * dominant spelling on this floor, and reading the subcommand off index 1 finds `-C`.
+ */
+const GIT_GLOBAL_VALUE_FLAGS = new Set([
+  '-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix', '--config-env',
+]);
+const GIT_GLOBAL_BOOLEAN_FLAGS = new Set([
+  '-p', '--paginate', '-P', '--no-pager', '--bare', '--no-replace-objects', '--no-optional-locks',
+  '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs',
+]);
+
+/**
+ * Where git's subcommand sits, or null when we cannot say.
+ *
+ * Null on an UNRECOGNISED flag, deliberately. Stepping over an unknown flag assumes it
+ * takes no value; when it does, the search lands on the flag's VALUE and reads it as the
+ * verb — which both misses the verb and makes an argument decide what gets written to the
+ * ledger. Git's global flags are a closed, documented set, unlike a whole CLI ecosystem's,
+ * so "unknown" here means a spelling we have not seen, and giving up under-counts a shape
+ * nobody writes rather than mis-reading one.
+ */
+function gitSubcommandIndex(argv: string[]): number | null {
+  let i = 1;
+  while (i < argv.length) {
+    const a = argv[i];
+    if (!a.startsWith('-')) return i;
+    const name = a.includes('=') ? a.slice(0, a.indexOf('=')) : a;
+    if (GIT_GLOBAL_VALUE_FLAGS.has(name)) { i += a.includes('=') ? 1 : 2; continue; }
+    if (GIT_GLOBAL_BOOLEAN_FLAGS.has(name)) { i += 1; continue; }
+    return null;
+  }
+  return null;
+}
+
+/**
+ * A git verb that destroys a checkout, named by a CONSTANT this file owns.
+ *
+ * The detail is a literal from the table below rather than a slice of argv, and that is
+ * the point: an `unresolved` row goes to a file an operator reads, so a construction that
+ * cannot carry an argument is worth more than one that is careful with them. See the
+ * `destructive_verb` code for why these shapes need a row at all.
+ *
+ * Nothing here changes a verdict. The command's `writes`, `verbWrites`, `removes` and
+ * `text` are untouched — we still cannot attribute the destruction to a path, which is
+ * exactly what the row says.
+ */
+function destructiveGitVerb(base: string, argv: string[]): Unresolved | null {
+  if (base !== 'git') return null;
+  const at = gitSubcommandIndex(argv);
+  if (at === null) return null;
+  const verb = argv[at];
+  const rest = argv.slice(at + 1);
+  const forced = rest.some((a) => a === '--force' || /^-[a-zA-Z]*f/.test(a));
+  const name = (detail: string): Unresolved => ({ code: 'destructive_verb', detail });
+  switch (verb) {
+    // `git worktree remove` takes the worktree's path, but what it deletes is that whole
+    // checkout, and `list`/`add`/`prune` in the same subcommand destroy nothing.
+    case 'worktree':
+      return rest[0] === 'remove' ? name('git worktree remove') : null;
+    // Without `-f` clean refuses to run at all, and `-n` makes it a dry run.
+    case 'clean':
+      return forced && !rest.some((a) => a === '--dry-run' || /^-[a-zA-Z]*n/.test(a)) ? name('git clean -f') : null;
+    // `--soft` and a bare `reset` move a ref; `--hard` overwrites the working tree.
+    case 'reset':
+      return rest.includes('--hard') ? name('git reset --hard') : null;
+    // A pathspec (`checkout -- .`) or `-f` discards the working tree; a branch name
+    // checkout is the ordinary, non-destructive spelling.
+    case 'checkout':
+      return rest.includes('--') || forced ? name('git checkout --') : null;
+    // restore's whole job is to overwrite from another source.
+    case 'restore':
+      return name('git restore');
+    default:
+      return null;
+  }
 }
 
 /** Operands a source-mutating verb takes away: everything but its destination. */
