@@ -25,7 +25,7 @@ import {
   getLogGraph, getCommitFiles, getFileAtRev, compareRefs, listWorktrees, checkoutRef
 } from './git';
 import { linkWorktreeDeps, unlinkWorktreeDeps } from './worktreeDeps';
-import { HiveManager, type AgentMeta, type HiveMessage, type HiveTask } from './hive';
+import { HiveManager, activityLog, type AgentMeta, type HiveMessage, type HiveTask } from './hive';
 import { HookServer } from './hooks';
 import { CircuitBreaker, type BreakerInput } from './breaker';
 import type { UsageProvider } from './usage';
@@ -1151,6 +1151,12 @@ function looksStuck(windowMs: number): boolean {
   return false;
 }
 
+/** Log rows god's heartbeat digest prints, and how many it reads to find them. The scan
+ *  is logTail's own default and costs nothing extra (it reads the whole file either way);
+ *  the gap between the two is the room a fail-open outage is collapsed out of. */
+const ACTIVITY_LOG_ROWS = 8;
+const ACTIVITY_LOG_SCAN = 200;
+
 /** Bounded digest for god — paths + counts, never full files (reference-passing,
  *  #6.2). A few hundred tokens at most. */
 function buildHeartbeatDigest(quietMs: number, actionable = 0): string {
@@ -1158,7 +1164,11 @@ function buildHeartbeatDigest(quietMs: number, actionable = 0): string {
   const active = Object.entries(reg.agents).filter(([id, a]) => !a.archived && id !== reg.godId);
   const names = active.map(([, a]) => a.name).join(', ') || '—';
   const boardHead = hive.board().split('\n').slice(0, 10).join('\n').trim();
-  const log = hive.logTail(8).map((e) => { try { return JSON.stringify(e); } catch { return ''; } }).filter(Boolean).join('\n');
+  // Scan deeper than we print (HAG-30). `policy-transport-failopen` is one row per hook
+  // call, so an outage fills eight rows in seconds and evicts every message, spawn and
+  // task row this digest exists to carry. activityLog collapses those to one count line
+  // and keeps the newest 8 REAL rows — read side only, the shim still writes every row.
+  const log = activityLog(hive.logTail(ACTIVITY_LOG_SCAN), ACTIVITY_LOG_ROWS);
   const withInbox = active.filter(([id]) => hive.inbox(id).length > 0).map(([, a]) => a.name);
   // When real agent/human mail is waiting, lead with an explicit call-to-action
   // instead of the "quiet" line — this beat fired BECAUSE of unread actionable
