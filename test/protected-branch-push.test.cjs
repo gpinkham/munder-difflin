@@ -113,6 +113,8 @@ test('P1. every push that names master or production-* as its destination is den
     'git push origin +feat/x:heads/production-1',
     'git push origin {feat,master}',
     'git push origin feat/{x,y}',
+    'git push origin mas{t,}er',
+    'git push origin HEAD:production-{1..3}x',
     'git --git-dir /r/.git push origin master',
     'git --work-tree /r push origin master',
     'git --git-dir /r/.git --work-tree /r push origin HEAD:master',
@@ -197,3 +199,16 @@ test('P5. GAP: an alias or a script file that pushes is not seen',
     assert.equal(e.evaluate(pre('git pm')).decision, 'deny');
     assert.equal(e.evaluate(pre('./scripts/release.sh')).decision, 'deny');
   });
+
+test('P6. the pattern runs in linear time: a crafted command cannot stall the main process', () => {
+  // 86428280's brace clause had three overlapping repeats: `a{,{,{,…` (16k chars) took
+  // over 10 s, synchronously, in front of every tool call.
+  const re = new RegExp(RULE.match.command_matches);
+  for (const unit of ['{,', '{', '@{', '{}', "'", 'a:', 'a*', '-o ', 'heads/'])
+    for (const tail of ['Q', ',x}', ':master', ' master']) {
+      const s = 'git push origin a' + unit.repeat(5000) + tail;
+      const t = Date.now();
+      re.test(s);
+      assert.ok(Date.now() - t < 250, `${JSON.stringify(unit)} + ${JSON.stringify(tail)}: ${Date.now() - t} ms`);
+    }
+});
