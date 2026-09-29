@@ -377,6 +377,102 @@ test('H2b. a path-value blind spot is not a structural one', () => {
   }
 });
 
+test('H3. a git verb that destroys a checkout names itself, because it names no path we can attribute', () => {
+  // The md-217 N3 gap: these commands delete or overwrite a working tree, but the path
+  // they act on is the repository they are standing in, which is never an operand. The
+  // parser used to report them as fully read with zero writes, so the accepted gap was
+  // invisible to `jq 'select(.event=="unresolved")'`. Counting is the whole change:
+  // no verdict moves (see H3c), and no path is invented (see H3d).
+  const one = (cmd, cwd) => effectiveCommands(cmd, cwd ?? '/work').at(-1);
+  for (const [cmd, detail] of [
+    ['git worktree remove ../md199-guardrail', 'git worktree remove'],
+    ['git worktree remove --force ../md199-guardrail', 'git worktree remove'],
+    ['git clean -fdx', 'git clean -f'],
+    ['git clean --force -d', 'git clean -f'],
+    ['git reset --hard', 'git reset --hard'],
+    ['git reset --hard origin/main', 'git reset --hard'],
+    ['git checkout -- .', 'git checkout --'],
+    ['git checkout -f', 'git checkout --'],
+    // The commonest spelling of it has no `--` and no `-f`. A `.`-rooted pathspec is
+    // never a legal branch name, so counting it cannot be a false positive (D1).
+    ['git checkout .', 'git checkout --'],
+    ['git checkout ./src', 'git checkout --'],
+    ['git checkout HEAD .', 'git checkout --'],
+    ['git restore .', 'git restore'],
+    ['git restore --source=HEAD src/main/shell.ts', 'git restore'],
+    // `git -C <dir>` is the dominant spelling on this floor; the verb sits at index 3.
+    ['git -C /work/agents/kelly clean -fdx', 'git clean -f'],
+    ['git -c core.hooksPath=/dev/null reset --hard', 'git reset --hard'],
+    // Still found through the wrappers the rest of the parser already undoes.
+    ['sudo -u gpinkham git reset --hard', 'git reset --hard'],
+    ['bash -c "git clean -fdx"', 'git clean -f'],
+    ['/usr/bin/git restore .', 'git restore']
+  ]) {
+    assert.deepEqual(one(cmd, '/work/agents/jim').unresolved, [{ code: 'destructive_verb', detail }], cmd);
+  }
+});
+
+test('H3b. an ordinary git command stays silent, or the count means nothing', () => {
+  const codes = (cmd) => effectiveCommands(cmd, '/work/agents/jim').flatMap((c) => c.unresolved.map((u) => u.code));
+  for (const cmd of [
+    'git push', 'git status', 'git log --oneline -1', 'git commit -m x', 'git add -A',
+    'git checkout main', 'git checkout -b feat/x', 'git switch main',
+    // A bare operand cannot be told from a branch name in general — `feature/x` has a
+    // slash and `somefile` has none — so anything but a `.`-rooted pathspec stays silent.
+    // That under-counts on purpose; the doc on `destructive_verb` says the number is a
+    // floor, not a census.
+    'git checkout feature/x', 'git checkout src/', 'git checkout notes.md',
+    'git reset --soft HEAD~1', 'git reset HEAD~1', 'git reset',
+    'git clean -n', 'git clean --dry-run', 'git clean -nd',
+    // Forced AND a dry run: -n wins, so this deletes nothing and must not be counted.
+    'git clean -nf', 'git clean -fdx --dry-run',
+    'git worktree list', 'git worktree add ../w feat/x', 'git worktree prune',
+    'git stash push -m x', 'git restore-wat', 'gitk'
+  ]) {
+    assert.deepEqual(codes(cmd), [], cmd);
+  }
+});
+
+test('H3c. counting the gap does not widen it into a verdict', () => {
+  // Not a STRUCTURAL blind spot: we know exactly which program runs and which operands
+  // it got, so the parse is sound and a caller may still trust the segmentation. What we
+  // cannot do is attribute the destruction to a path — the same shape as `missing_cwd`,
+  // and the reason H2b exists. The structural set is policy.ts's licence to fall back to
+  // whole-command-string reasoning, and nothing here calls for that.
+  assert.equal(STRUCTURAL_UNRESOLVED.has('destructive_verb'), false);
+  const one = effectiveCommands('git -C /work/agents/kelly clean -fdx', '/work/agents/jim').at(-1);
+  assert.deepEqual(one.writes, [], 'no path is invented from a repository we cannot see');
+  assert.deepEqual(one.verbWrites, []);
+  assert.deepEqual(one.removes, []);
+  assert.equal(one.text, 'git -C /work/agents/kelly clean -fdx', 'the subject a rule matches is unchanged');
+});
+
+test('H3d. the detail is a constant from the table, never anything the caller typed', () => {
+  // Rows go to a file an operator reads, so the safe construction is to emit a literal
+  // this file owns rather than a slice of argv — then no argument, path or secret can
+  // reach the ledger through this code at all.
+  const details = (cmd) => effectiveCommands(cmd, '/work/agents/jim').flatMap((c) => c.unresolved.map((u) => u.detail));
+  const d = details('git -C /Users/me/.ssh/AKIAIOSFODNN7EXAMPLE reset --hard sk-secret-ref');
+  assert.deepEqual(d, ['git reset --hard']);
+  assert.equal(JSON.stringify(d).includes('secret'), false);
+  assert.equal(JSON.stringify(d).includes('AKIA'), false);
+});
+
+test('H3e. an unrecognised git global flag gives up rather than guessing onto its value', () => {
+  // Same trap as the corpus scrubber: stepping over an unknown flag assumes it takes no
+  // value, and when it does the search lands on the VALUE and reads it as the verb. That
+  // would both miss the verb and make the table's constant depend on an argument. Git's
+  // own global flags are a closed set, so unknown means give up — which under-counts the
+  // gap on a shape nobody writes, and never mis-reads one.
+  const codes = (cmd) => effectiveCommands(cmd, '/work/agents/jim').flatMap((c) => c.unresolved.map((u) => u.code));
+  assert.deepEqual(codes('git --future-flag reset --hard'), [], 'silent, not wrong');
+  assert.deepEqual(codes('git --future-flag restore'), []);
+  // A value flag we DO know is stepped over correctly, value and all.
+  assert.deepEqual(codes('git --git-dir restore reset --hard'), ['destructive_verb'],
+    "the flag's value is a value, even when it spells a verb");
+  assert.deepEqual(codes('git --git-dir=/w/.git reset --hard'), ['destructive_verb']);
+});
+
 // --- 3. honesty and robustness ------------------------------------------------
 
 test('3. an xargs operand we cannot read is reported as unresolved, not invented', () => {
