@@ -204,9 +204,9 @@ test('P6. the pattern runs in linear time: a crafted command cannot stall the ma
   // 86428280's brace clause had three overlapping repeats: `a{,{,{,…` (16k chars) took
   // over 10 s, synchronously, in front of every tool call.
   const re = new RegExp(RULE.match.command_matches);
-  for (const unit of ['{,', '{', '@{', '{}', "'", 'a:', 'a*', '-o ', 'heads/'])
+  for (const unit of ['{,', '{', '@{', '{}', "'", 'a:', 'a*', '-o ', 'heads/', '--x ', '-C ', '--git-dir '])
     for (const tail of ['Q', ',x}', ':master', ' master']) {
-      const s = 'git push origin a' + unit.repeat(5000) + tail;
+      const s = (unit.startsWith('-') ? 'git ' : 'git push origin a') + unit.repeat(unit.startsWith('-') ? 40 : 5000) + tail;
       const t = Date.now();
       re.test(s);
       assert.ok(Date.now() - t < 250, `${JSON.stringify(unit)} + ${JSON.stringify(tail)}: ${Date.now() - t} ms`);
