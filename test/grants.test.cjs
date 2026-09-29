@@ -163,7 +163,7 @@ function engine(rules) {
   fs.mkdirSync(path.join(root, 'policy'));
   fs.writeFileSync(path.join(root, 'policy', 'engine.json'), JSON.stringify({ version: 1, rules }));
   const rows = [];
-  const e = new PolicyEngine(root, (r) => rows.push(r), () => [], () => [], resolver);
+  const e = new PolicyEngine(root, (r) => rows.push(r), () => [], () => [], () => false, resolver);
   e.load();
   return { e, rows, root, grants: new GrantStore(path.join(root, 'policy', 'grants.jsonl')) };
 }

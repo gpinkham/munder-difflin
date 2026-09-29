@@ -955,7 +955,9 @@ export class PolicyEngine {
       };
       const row = corpusRecord({
         payload: { tool_name: p.tool_name, agent_id: p.agent_id, tool_input: p.tool_input, cwd: p.cwd },
-        verdict: { decision: v.decision, ruleId: v.ruleId, mode: v.mode, matchedOn: v.matchedOn, wouldDeny: v.wouldDeny },
+        // Field by field, as corpus.ts requires: `grantId` is a value, so only the fact
+        // that a grant was used (live) crosses over. A dry_run note of a grant is not a use.
+        verdict: { decision: v.decision, ruleId: v.ruleId, mode: v.mode, matchedOn: v.matchedOn, wouldDeny: v.wouldDeny, granted: !!v.grantId && !v.wouldDeny },
         commands: ctx?.commands ?? [],
         ctx: cctx,
         digest: input_digest,

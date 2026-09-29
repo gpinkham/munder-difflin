@@ -38,8 +38,11 @@
 
 /** Bumped when the record shape changes, so a corpus is never silently mixed.
  *  2 — the subcommand of a multi-verb program is kept (md-136 N2). Schema-1 rows
- *  predate that and record it as `<arg>`, so they are not comparable on it. */
-export const CORPUS_SCHEMA = 2;
+ *  predate that and record it as `<arg>`, so they are not comparable on it.
+ *  3 — `granted` (HAG-49): an ask rule's action allowed by an operator's one-action
+ *  grant. Without it that row reads as an ordinary allow. The grant's id is a value
+ *  and is never written; only the fact that one was used. */
+export const CORPUS_SCHEMA = 3;
 
 /** Local-only, and beside the policy it describes: `<hive>/policy/`. That directory is
  *  already the one place agents may not write (policy self-protection), and keeping the
@@ -287,6 +290,8 @@ export interface CorpusInput {
     mode?: string;
     matchedOn?: string;
     wouldDeny?: boolean;
+    /** True when an operator's grant allowed an ask rule's action (HAG-49). */
+    granted?: boolean;
   };
   /** Already parsed by shell.ts for the decision itself, so this costs no re-parse. */
   commands?: Array<{ argv: string[]; writes: string[]; removes: string[]; unresolved?: Array<{ code: string }> }>;
@@ -326,6 +331,7 @@ export function corpusRecord(input: CorpusInput): Record<string, unknown> {
     decision: verdict.decision,
     mode: verdict.mode ?? null,
     would_deny: verdict.wouldDeny ?? false,
+    granted: verdict.granted === true,
     matched_on: verdict.matchedOn ?? null,
     tool: payload.tool_name ?? null,
     agent: agentLabel(payload.agent_id, ctx) ?? '<agent:unknown>',
