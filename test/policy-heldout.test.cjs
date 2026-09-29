@@ -46,25 +46,53 @@ test('H1. a push asks every time: an earlier consent is never carried to the nex
   }
 });
 
-// Each of these puts work outside this machine, so each needs the ask. None is
-// in the remote-push vocabulary today, so each proceeds with no ask at all.
-const PUBLISH_WITHOUT_ASK = [
+// Each of these puts work outside this machine, so each needs the ask. Until
+// the pack named them (2026-09-29), each proceeded with no ask and no ledger row.
+// Like every route in this rule, a --help on one of them is asked about too: one
+// extra prompt, the cost the rule already accepts rather than an exemption to hide in.
+const PUBLISH_ROUTES = [
   'gh pr merge 12 --squash --delete-branch',
   'gh api -X POST repos/o/r/pulls -f head=feat/x -f base=main',
+  'gh api --method=PATCH repos/o/r -f private=false',
   'gh repo create o/r --public --source=. --push',
   'curl --request POST -H "Authorization: token $T" https://api.github.com/repos/o/r/issues -d @b.json',
   'git -c alias.ship=push ship origin main',
+  'git -C /r -c alias.ship=push ship',
   'git send-pack origin refs/heads/main',
-  'rsync -az dist/ deploy@example.org:/var/www/site/'
+  'bash -c \'gh pr merge 12\''
 ];
 
-for (const command of PUBLISH_WITHOUT_ASK) {
-  test(`H1b. GAP: publishing proceeds with no ask: ${command}`,
-    { todo: 'outside the remote-push vocabulary; a pack change, not an engine change' }, () => {
-      const { e } = shipped();
-      assert.equal(e.evaluate(pre('Bash', { command })).decision, 'ask');
-    });
-}
+test('H1b. every route that publishes is asked about, through the engine', () => {
+  const { e } = shipped();
+  for (const command of PUBLISH_ROUTES) {
+    const v = e.evaluate(pre('Bash', { command }));
+    assert.equal(v.decision, 'ask', command);
+    assert.equal(v.ruleId, 'remote-push', command);
+  }
+});
+
+test('H1c. the neighbours of those routes that publish nothing are not asked about', () => {
+  const { e } = shipped();
+  for (const command of [
+    'gh api repos/o/r/pulls',
+    'gh api -X GET repos/o/r/pulls',
+    'gh pr view 12',
+    'gh repo create o/r --private',
+    'git -c alias.lg=log lg --oneline',
+    'curl --request GET https://api.github.com/repos/o/r',
+    'curl --request POST http://localhost:8080/hook',
+    'git push --dry-run',
+    'echo "gh pr merge 12"'
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command })).decision, 'allow', command);
+  }
+});
+
+test('H1d. GAP: a deploy to a remote host proceeds with no ask',
+  { todo: 'deferred by Gary 2026-09-29: whether rsync/scp to a remote host counts as publishing' }, () => {
+    const { e } = shipped();
+    assert.equal(e.evaluate(pre('Bash', { command: 'rsync -az dist/ deploy@example.org:/var/www/site/' })).decision, 'ask');
+  });
 
 // --- H2. The completion report contradicts the tool log -----------------------
 
