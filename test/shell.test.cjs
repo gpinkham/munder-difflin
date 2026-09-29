@@ -393,6 +393,11 @@ test('H3. a git verb that destroys a checkout names itself, because it names no 
     ['git reset --hard origin/main', 'git reset --hard'],
     ['git checkout -- .', 'git checkout --'],
     ['git checkout -f', 'git checkout --'],
+    // The commonest spelling of it has no `--` and no `-f`. A `.`-rooted pathspec is
+    // never a legal branch name, so counting it cannot be a false positive (D1).
+    ['git checkout .', 'git checkout --'],
+    ['git checkout ./src', 'git checkout --'],
+    ['git checkout HEAD .', 'git checkout --'],
     ['git restore .', 'git restore'],
     ['git restore --source=HEAD src/main/shell.ts', 'git restore'],
     // `git -C <dir>` is the dominant spelling on this floor; the verb sits at index 3.
@@ -412,6 +417,11 @@ test('H3b. an ordinary git command stays silent, or the count means nothing', ()
   for (const cmd of [
     'git push', 'git status', 'git log --oneline -1', 'git commit -m x', 'git add -A',
     'git checkout main', 'git checkout -b feat/x', 'git switch main',
+    // A bare operand cannot be told from a branch name in general — `feature/x` has a
+    // slash and `somefile` has none — so anything but a `.`-rooted pathspec stays silent.
+    // That under-counts on purpose; the doc on `destructive_verb` says the number is a
+    // floor, not a census.
+    'git checkout feature/x', 'git checkout src/', 'git checkout notes.md',
     'git reset --soft HEAD~1', 'git reset HEAD~1', 'git reset',
     'git clean -n', 'git clean --dry-run', 'git clean -nd',
     // Forced AND a dry run: -n wins, so this deletes nothing and must not be counted.

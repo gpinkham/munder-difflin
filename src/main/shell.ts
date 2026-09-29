@@ -73,6 +73,11 @@ export type UnresolvedCode =
    * rule can reach them. That gap is accepted policy — but until this code existed the
    * parser reported them as fully read with zero writes, so the gap could not be sized
    * from the ledger either. This makes it countable without deciding anything about it.
+   *
+   * SCOPE: the five shapes in `destructiveGitVerb`'s table, and only those. A count of
+   * these rows sizes THAT list, not destructive git in general — an operand we cannot
+   * tell from a branch name (`git checkout somefile`) is still silent by design, so read
+   * the number as a floor rather than a census.
    */
   | 'destructive_verb';
 
@@ -963,7 +968,12 @@ function destructiveGitVerb(base: string, argv: string[]): Unresolved | null {
     // A pathspec (`checkout -- .`) or `-f` discards the working tree; a branch name
     // checkout is the ordinary, non-destructive spelling.
     case 'checkout':
-      return rest.includes('--') || forced ? name('git checkout --') : null;
+      // `git checkout .` and `git checkout ./src` discard the working tree with no `--`
+      // and no `-f`, and are the commonest spelling of it. A bare operand cannot be told
+      // from a branch name in general (`feature/x` has a slash), so only the `.`-rooted
+      // pathspec — which is never a branch — is added here.
+      return rest.includes('--') || forced
+        || rest.some((a) => a === '.' || a.startsWith('./')) ? name('git checkout --') : null;
     // restore's whole job is to overwrite from another source.
     case 'restore':
       return name('git restore');
