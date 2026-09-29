@@ -459,16 +459,19 @@ export class PolicyEngine {
       this.fail(invalid.map((i) => `${i.id}: ${i.why}`).join('; '), invalid);
       return; // all-or-nothing: a policy you cannot fully trust is not loaded
     }
-    const rc = parsed.report_check;
+    // The report check is an observer, not a rule. A bad block turns IT off and says so;
+    // it must never unload the rules (Dwight, HAG-46 R1): "partial enforcement is
+    // believed" is about rules, and nobody believes an off observer is enforcing.
+    let rc: { mode?: PolicyMode } | undefined = parsed.report_check;
     if (rc !== undefined) {
-      const mode = rc === null || typeof rc !== 'object' || Array.isArray(rc) ? undefined : (rc as { mode?: unknown }).mode;
-      if (mode !== undefined && mode !== 'dry_run' && mode !== 'live') {
-        this.fail(`report_check.mode must be dry_run or live, got ${JSON.stringify(mode)}`);
-        return;
-      }
-      if (rc === null || typeof rc !== 'object' || Array.isArray(rc)) {
-        this.fail('report_check must be an object, e.g. { "mode": "dry_run" }');
-        return;
+      const why = rc === null || typeof rc !== 'object' || Array.isArray(rc)
+        ? 'report_check must be an object, e.g. { "mode": "dry_run" }'
+        : rc.mode !== undefined && rc.mode !== 'dry_run' && rc.mode !== 'live'
+          ? `report_check.mode must be dry_run or live, got ${JSON.stringify(rc.mode)}`
+          : null;
+      if (why) {
+        this.log({ kind: 'report-check-config-invalid', path: this.policyPath, error: why });
+        rc = undefined;
       }
     }
     if (!rules.length) {

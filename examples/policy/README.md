@@ -188,23 +188,35 @@ It is **off unless the policy file turns it on**, with a top-level block beside
   gain no hook, nothing is recorded, no row is written, nobody is told.
 - **`dry_run`**: writes `report-check-outcome` and `report-check-flag` rows to
   `log.jsonl`. Use it for a week and read every flag before going live.
-- **`live`**: the same rows, and god gets one note per contradiction. It **never
+- **`live`**: the same rows, and god gets a note on a contradiction, at most one per
+  agent every 10 minutes (each flag row says whether it was `noted`). It **never
   blocks**: the message is always delivered.
-- With no `mode`, it takes `defaults.mode`. A `mode` other than `dry_run` or `live`
-  fails the whole policy load, like any other bad rule.
+- With no `mode`, it takes `defaults.mode`. A malformed block (`"LIVE"`, `true`)
+  turns **only the check** off and logs `report-check-config-invalid`; the rules
+  still load. An observer that fails to start must not take the guardrail with it.
 
 What it keeps is deliberately thin:
-- **Outcome row:** the runner (`npm test`, `node --test`, `pytest`, `jest`, `vitest`,
-  `go test`, `cargo test`, `make test`), pass or fail, and one integer, the failure
-  count from the runner's summary line. No output, no test names, and a digest of
+- **Outcome row:** the runner (npm/yarn/pnpm/bun `test`, `node --test`, `pytest`
+  including `uv run` / `poetry run`, `unittest`, `jest`, `vitest`, `playwright test`,
+  `go test`, `cargo test`, `make test`, `mvn test`, `gradle test`), pass or fail, and
+  one integer, the failure count from the runner's summary line (a log line such as
+  "3 failed attempts" is not read as one). No output, no test names, and a digest of
   the command rather than the command itself.
 - **Flag row:** the claim words that matched, not the message.
 
 What counts as a claim: only a claim of **zero failures** ("suite green", "all tests
-pass", "0 failures"). "Done", "clean" and "no new failures" do not count, so an
-honest report on a repo with known failing tests is not flagged. A claim negated in
-its own sentence, or inside quotes, is ignored. A claim with no recorded run is
-logged as `unsupported` and never sent to god.
+pass", "0 failures", "the suite passes"). "Done", "clean" and "no new failures" do
+not count, so an honest report on a repo with known failing tests is not flagged.
+Nor does a claim that is negated, conditional or required ("if all tests pass",
+"once the suite is green", "we need tests passing"), a question, a quote, someone
+else's words relayed ("Jim says all tests pass"), or talk of other failures ("no
+fail-open rows", "no failed deliveries"). A claim with no recorded run is logged as
+`unsupported` and never sent to god.
+
+The window is the agent's last test run in its current session. A real start or
+`/clear` resets it; a compaction or resume does not, since the red run before it is
+still the state of things. The window is per agent, not per repo: a red run in one
+repo followed by a green claim about another is flagged.
 
 Changes take effect on restart, like the rules. Agents spawned before the restart
 keep their old settings, so **respawn them** to pick up the failure hook: a failed

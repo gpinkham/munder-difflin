@@ -58,6 +58,9 @@ export interface ReportMessage {
   body?: string;
 }
 
+/** At most one note to god per agent in this window; the rows are still written. */
+export const NOTE_INTERVAL_MS = 10 * 60 * 1000;
+
 /** The sender name this module uses when it tells god, so it never checks itself. */
 export const REPORT_CHECK_SENDER = 'report-check';
 
@@ -70,16 +73,30 @@ export function testRunner(command: string, cwd?: string): string | null {
   let cmds;
   try { cmds = effectiveCommands(command, cwd); } catch { return null; }
   for (const c of cmds) {
-    const [a0, a1, a2] = c.argv;
+    // Launchers that run the real runner: `uv run pytest`, `poetry run pytest`,
+    // `pipenv run pytest`, `npx jest`, `bunx vitest`, `pnpm exec vitest`.
+    let argv = c.argv;
+    for (;;) {
+      const [x0, x1] = argv;
+      if ((x0 === 'uv' || x0 === 'poetry' || x0 === 'pipenv' || x0 === 'hatch') && x1 === 'run') argv = argv.slice(2);
+      else if (x0 === 'npx' || x0 === 'bunx') argv = argv.slice(1);
+      else if ((x0 === 'pnpm' || x0 === 'yarn' || x0 === 'npm') && x1 === 'exec') argv = argv.slice(2);
+      else break;
+    }
+    const [a0, a1, a2] = argv;
     if (!a0) continue;
-    if ((a0 === 'npm' || a0 === 'yarn' || a0 === 'pnpm')
+    if ((a0 === 'npm' || a0 === 'yarn' || a0 === 'pnpm' || a0 === 'bun')
       && (a1 === 'test' || a1 === 't' || (a1 === 'run' && /^test(?::|$)/.test(a2 ?? '')))) return `${a0} test`;
-    if (a0 === 'node' && c.argv.includes('--test')) return 'node --test';
+    // `yarn jest`, `pnpm vitest`: the package manager runs a bin directly.
+    if ((a0 === 'yarn' || a0 === 'pnpm') && (a1 === 'jest' || a1 === 'vitest')) return a1;
+    if (a0 === 'node' && argv.includes('--test')) return 'node --test';
     if (a0 === 'pytest' || a0 === 'py.test') return 'pytest';
-    if (/^python3?$/.test(a0) && a1 === '-m' && a2 === 'pytest') return 'pytest';
+    // The parser already turns `python -m <module>` into the module.
+    if (a0 === 'unittest') return 'unittest';
+    if (/^python3?$/.test(a0) && a1 === '-m' && (a2 === 'pytest' || a2 === 'unittest')) return a2;
     if (a0 === 'jest' || a0 === 'vitest') return a0;
-    if (a0 === 'npx' && (a1 === 'jest' || a1 === 'vitest')) return a1;
-    if ((a0 === 'go' || a0 === 'cargo' || a0 === 'make') && a1 === 'test') return `${a0} test`;
+    if (a0 === 'playwright' && a1 === 'test') return 'playwright test';
+    if ((a0 === 'go' || a0 === 'cargo' || a0 === 'make' || a0 === 'mvn' || a0 === 'gradle' || a0 === 'gradlew' || a0 === './gradlew') && a1 === 'test') return `${a0.replace(/^\.\//, '')} test`;
   }
   return null;
 }
@@ -87,14 +104,24 @@ export function testRunner(command: string, cwd?: string): string | null {
 /**
  * The one integer read from test output: the failure count on the runner's summary
  * line. The LAST summary wins, since a run can print per-file counts before the
- * total. null when no summary was printed.
+ * total. null when no summary was printed. A count counts only on a summary-shaped
+ * line: a captured log saying "3 failed attempts" is not a test result.
  *   node --test / TAP: `# fail 3`   pytest: `3 failed, 10 passed`
  *   jest / vitest: `Tests: 3 failed`   mocha: `3 failing`
  */
 export function failCount(text: string): number | null {
-  const re = /^#\s*fail\s+(\d+)\s*$|\b(\d+)\s+(?:failed|failing)\b/gm;
   let last: number | null = null;
-  for (const m of text.matchAll(re)) last = Number(m[1] ?? m[2]);
+  for (const line of text.split('\n')) {
+    const tap = /^#\s*fail\s+(\d+)\s*$/.exec(line);
+    if (tap) { last = Number(tap[1]); continue; }
+    // mocha: the count stands alone on its line.
+    const alone = /^\s*(\d+)\s+failing\b[^\w]*$/.exec(line);
+    if (alone) { last = Number(alone[1]); continue; }
+    // pytest / jest / vitest: only on a SUMMARY line, one that also counts passes or a
+    // total, or is a framed or "Tests:" line. "3 failed attempts" in a log is not one.
+    const n = /\b(\d+)\s+(?:failed|failing)\b/.exec(line);
+    if (n && (/\b(?:passed|passing|total|skipped)\b/.test(line) || /^\s*(?:Tests?:|=|-{3,})/.test(line))) last = Number(n[1]);
+  }
   return last;
 }
 
@@ -128,18 +155,28 @@ export function outcomeOf(p: OutcomePayload): ToolOutcome | null {
  * repo whose suite has known failures, "done, 22 fail as before" is a true report
  * after a red exit, and flagging it is the false positive that made this check
  * useless in the scope card. "No new failures" is not a zero-failure claim either.
- * A claim that is negated in its own sentence, or sits inside quotes, is dropped.
+ * A claim is dropped when its clause (split at . ; ! ? , and newlines) negates it,
+ * makes it a condition or a requirement ("if all tests pass", "once the suite is
+ * green", "we need tests passing"), relays someone else's words ("Jim says all tests
+ * pass"), asks it as a question, or quotes it. "No fail-open rows" and "no failed
+ * deliveries" are not claims about tests.
  */
 export function greenClaims(text: string): string[] {
-  const CLAIM = /\b(?:all (?:the )?tests? (?:pass(?:ed|es|ing)?|green)|tests? (?:are |all )?(?:pass(?:ed|es|ing)?|green)|suite (?:is |was |now )?(?:green|passing)|(?:0|zero|no) (?:test )?fail(?:s|ures?|ed|ing)?\b|(?:is|are|all|now|fully) green|green (?:suite|tests?|build|run))/gi;
+  const CLAIM = /\b(?:all (?:the )?tests? (?:pass(?:ed|es|ing)?|green)|tests?:? (?:are |all )?(?:pass(?:ed|es|ing)?|green)|(?:the )?suite (?:is |was |now )?(?:green|passing|pass(?:es|ed))|everything pass(?:es|ed)|100% pass(?:ing|es)?|(?:0|zero|no) (?:test )?(?:failures?|failing)(?![-\w])|0 failed\b(?!\s+[a-z])|green (?:suite|tests?|build|run))/gi;
   const NEGATION = /\b(?:not|never|no longer|isn't|aren't|wasn't|weren't|doesn't|didn't|won't|cannot|can't)\b/i;
+  // A condition, a requirement or a question is not a report of what happened.
+  const HYPOTHETICAL = /\b(?:if|once|when|whenever|until|unless|before|after|need|needs|should|must|would|will|could|can|want|expect)\b/i;
+  // Someone else's words, relayed: not this agent's claim about its own run.
+  const RELAYED = /\b(?:says?|said|reports?|reported|claims?|claimed|according to|wrote|writes)\b/i;
   const found = new Set<string>();
-  for (const clause of text.split(/[.;!?\n]+/)) {
+  for (const raw of text.split(/(?<=[.;!?\n,])/)) {
+    const clause = raw.trim();
+    if (clause.endsWith('?')) continue;
     for (const m of clause.matchAll(CLAIM)) {
       const before = clause.slice(0, m.index);
-      if (NEGATION.test(before)) continue;
+      if (NEGATION.test(before) || HYPOTHETICAL.test(before) || RELAYED.test(before)) continue;
       // Inside quotes: an odd number of quote marks before the match on this clause.
-      if ((before.match(/["`“”]/g) ?? []).length % 2 === 1) continue;
+      if ((before.match(/["`\u201c\u201d]/g) ?? []).length % 2 === 1) continue;
       found.add(m[0].toLowerCase());
     }
   }
@@ -152,6 +189,7 @@ export function greenClaims(text: string): string[] {
  */
 export class ReportCheck {
   private last = new Map<string, ToolOutcome>();
+  private lastNote = new Map<string, number>();
 
   constructor(
     private config: ReportCheckConfig,
@@ -162,8 +200,13 @@ export class ReportCheck {
 
   get mode(): PolicyMode { return this.config.mode; }
 
-  /** A new session starts a new window: an old red run is not this session's. */
-  sessionStarted(agentId: string): void {
+  /**
+   * A new session starts a new window: an old red run is not this session's. Only a
+   * real start or a /clear resets it. A compaction or a resume is the same session
+   * carrying on, so a red run before it is still the current state (HAG-46 Q4).
+   */
+  sessionStarted(agentId: string, source?: string): void {
+    if (source === 'compact' || source === 'resume') return;
     this.last.delete(agentId);
   }
 
@@ -185,7 +228,7 @@ export class ReportCheck {
   }
 
   /** Check one delivered message. Returns the verdict, for tests. */
-  checkMessage(msg: ReportMessage): 'contradicts' | 'unsupported' | null {
+  checkMessage(msg: ReportMessage, now = Date.now()): 'contradicts' | 'unsupported' | null {
     const from = msg.from;
     if (!from || from === REPORT_CHECK_SENDER) return null;
     const claims = greenClaims(`${msg.subject ?? ''}\n${msg.body ?? ''}`);
@@ -195,6 +238,8 @@ export class ReportCheck {
     if (!o) verdict = 'unsupported';
     else if (o.ok === false) verdict = 'contradicts';
     if (!verdict) return null;
+    const noteDue = verdict === 'contradicts' && this.config.mode === 'live'
+      && now - (this.lastNote.get(from) ?? -Infinity) >= NOTE_INTERVAL_MS;
     this.log({
       kind: 'report-check-flag',
       verdict,
@@ -207,10 +252,12 @@ export class ReportCheck {
       outcome_at: o?.at ?? null,
       runner: o?.runner ?? null,
       fail_count: o?.failCount ?? null,
+      ...(this.config.mode === 'live' ? { noted: noteDue } : {}),
     });
     // Only a contradiction is worth god's attention. "Unsupported" is common and
     // innocent (a relayed report, a run in a subagent), so it stays a row.
-    if (verdict === 'contradicts' && this.config.mode === 'live') {
+    if (noteDue) {
+      this.lastNote.set(from, now);
       const count = o?.failCount != null ? `${o.failCount} failing` : 'a failed exit';
       try {
         this.tellGod(

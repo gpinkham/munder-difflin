@@ -506,7 +506,7 @@ export class HookServer {
       try {
         const rc = this.reportCheck();
         if (rc) {
-          if (event === 'SessionStart') rc.sessionStarted(agentId);
+          if (event === 'SessionStart') rc.sessionStarted(agentId, p.source);
           else rc.recordOutcome({ ...p, agent_id: agentId });
         }
       } catch { /* the check must never break a hook */ }

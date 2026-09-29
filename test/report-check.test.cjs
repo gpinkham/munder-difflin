@@ -53,6 +53,10 @@ test('a test run is recognised through wrappers, and a mention of one is not', (
     ['node --test test/*.test.cjs', 'node --test'], ['npm test 2>&1 | tail -5', 'npm test'],
     ['bash -c "pytest -q"', 'pytest'], ['python3 -m pytest tests/', 'pytest'], ['npx vitest run', 'vitest'],
     ['jest --ci', 'jest'], ['go test ./...', 'go test'], ['cargo test', 'cargo test'], ['make test', 'make test'],
+    // Launchers (Dwight, HAG-46 R4).
+    ['uv run pytest -q', 'pytest'], ['poetry run pytest', 'pytest'], ['yarn jest', 'jest'], ['pnpm vitest run', 'vitest'],
+    ['bun test', 'bun test'], ['npx playwright test', 'playwright test'], ['python -m unittest discover', 'unittest'],
+    ['mvn test', 'mvn test'], ['./gradlew test', 'gradlew test'], ['pnpm exec vitest', 'vitest'],
   ]) assert.equal(testRunner(command), runner, command);
   for (const command of ['npm run build', 'echo npm test', 'grep -rn pytest .', 'node script.js', 'git commit -m "npm test"', 'make', 'go build ./...'])
     assert.equal(testRunner(command), null, command);
@@ -66,15 +70,25 @@ test('the failure count is read from the last summary line of each runner', () =
   assert.equal(failCount('# fail 1\n...\n# fail 0'), 0, 'the last summary wins');
   assert.equal(failCount('all good'), null);
   assert.equal(failCount('failed to connect'), null, 'a word is not a count');
+  // A captured log line is not a summary (Dwight, HAG-46 R3).
+  assert.equal(failCount('retry: 3 failed attempts\n===== 10 passed in 2.0s ====='), null);
+  assert.equal(failCount('retry: 3 failed attempts\n===== 1 failed, 9 passed in 2.0s ====='), 1);
 });
 
 test('a zero-failure claim is found; done, counts and "no new failures" are not claims', () => {
-  for (const text of ['Done. Suite green.', 'All tests pass.', 'tests passing, 0 failures', 'Everything is green now', 'no failures', 'Tests are green'])
-    assert.ok(greenClaims(text).length > 0, text);
+  for (const text of [
+    'Done. Suite green.', 'All tests pass.', 'tests passing, 0 failures', 'no failures', 'Tests are green',
+    'The suite passes.', 'Everything passes.', 'tests: all passed', '100% passing', '12 passed, 0 failed',
+    'I did not touch the engine, and all tests pass.',
+  ]) assert.ok(greenClaims(text).length > 0, text);
   for (const text of [
     'Done.', 'Done: 1082 pass, 22 fail, same 22 as the baseline.', 'no new failures', 'Scan clean.',
     'The suite is not green yet.', 'Tests aren\'t passing.', 'Dwight wrote "all tests pass" in his report',
     'This is no longer green', 'green light from Gary',
+    // This office's own vocabulary (Dwight, HAG-46 R2).
+    'no fail-open rows were written', 'zero fail-opens in the ledger', 'no failed deliveries', '0 failed deliveries',
+    'if all tests pass we ship', 'once the suite is green, push', 'we need all tests passing before merge',
+    'Are all tests green?', 'Jim says all tests pass', 'the light is green',
   ]) assert.deepEqual(greenClaims(text), [], text);
 });
 
@@ -130,11 +144,24 @@ test('another agent\'s red run does not count against this one', () => {
   assert.equal(rc.checkMessage(report('All tests pass.')), null);
 });
 
-test('a new session starts a new window', () => {
-  const { rc } = checker();
+test('a new session starts a new window; a compaction or resume does not', () => {
+  for (const [source, verdict] of [['startup', 'unsupported'], ['clear', 'unsupported'], ['compact', 'contradicts'], ['resume', 'contradicts']]) {
+    const { rc } = checker();
+    rc.recordOutcome(failed('npm test', '# fail 3'));
+    rc.sessionStarted('a', source);
+    assert.equal(rc.checkMessage(report('All tests pass.')), verdict, source);
+  }
+});
+
+test('live mode tells god once per agent per 10 minutes; every flag is still a row', () => {
+  const { rc, rows, notes } = checker('live');
   rc.recordOutcome(failed('npm test', '# fail 3'));
-  rc.sessionStarted('a');
-  assert.equal(rc.checkMessage(report('All tests pass.')), 'unsupported');
+  const t0 = Date.parse('2026-09-29T12:00:00Z');
+  rc.checkMessage(report('Suite green.'), t0);
+  rc.checkMessage(report('All tests pass.'), t0 + 60_000);
+  rc.checkMessage(report('Suite green.'), t0 + 11 * 60_000);
+  assert.equal(notes.length, 2);
+  assert.deepEqual(rows.filter((r) => r.kind === 'report-check-flag').map((r) => r.noted), [true, false, true]);
 });
 
 test('live mode tells god about a contradiction; dry_run never does', () => {
@@ -192,12 +219,16 @@ test('the check is off unless the policy file turns it on', () => {
   assert.deepEqual(engineWith({ version: 1, defaults: { mode: 'dry_run' }, rules: [RULE], report_check: {} }).e.reportCheck, { mode: 'dry_run' });
 });
 
-test('a malformed report_check fails the whole load, like any bad rule', () => {
-  for (const rc of [{ mode: 'loud' }, 'on', null, []]) {
+test('a malformed report_check turns only the check off, and the rules still load', () => {
+  // Dwight, HAG-46 R1: {mode:'LIVE'} used to unload every rule, so switching on an
+  // observer could switch off the guardrail.
+  for (const rc of [{ mode: 'LIVE' }, { mode: 'loud' }, 'on', true, null, []]) {
     const { e, rows } = engineWith({ version: 1, rules: [RULE], report_check: rc });
-    assert.equal(e.ruleCount, 0, JSON.stringify(rc));
+    assert.equal(e.ruleCount, 1, JSON.stringify(rc));
+    assert.equal(e.error, null);
     assert.equal(e.reportCheck, null);
-    assert.ok(rows.some((r) => r.kind === 'policy-load-failed'));
+    assert.ok(rows.some((r) => r.kind === 'report-check-config-invalid'), JSON.stringify(rc));
+    assert.equal(rows.some((r) => r.kind === 'policy-load-failed'), false);
   }
 });
 
