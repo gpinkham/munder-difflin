@@ -149,6 +149,26 @@ pr merge`), by REST (Cloud `…/pullrequests/<id>/merge`, Server/DC
 
 Keep deny rules ahead of any `ask` rule: rules are first-match.
 
+## Denying a push to a protected branch (`protected-branch-push`)
+
+Not in the shipped pack, because the branch names are a floor's own: the rule is
+[`protected-branch-push.rule.json`](protected-branch-push.rule.json), written for
+`master` and `production-*`. Edit the two names for another floor, then paste the rule
+into `engine.json` **ahead of `remote-push`**. It needs no engine change.
+
+- **Denied:** a `git push`, `git subtree push` or `git send-pack` whose destination is
+  protected: `origin master`, `HEAD:master`, `feat:refs/heads/production-x`, `+master`,
+  `:master`, `--delete origin master`, and any of those forced. Also denied: `--all`,
+  `--branches`, `--mirror` and wildcard refspecs, which reach every branch at once.
+- **Allowed:** feature-branch pushes (forced or not), `--dry-run`/`-n`, a protected
+  branch as the source only (`master:feat/x`), and `bb pr create` to a protected
+  branch, which is how work should reach it.
+- **Not covered:** a push that names no destination (`git push`, `git push origin`,
+  `git push origin HEAD`) goes wherever the current branch says. From `master` it
+  lands on `master` and is only asked about under `remote-push`. A destination set in
+  git config, an alias and a script file are not seen either. Branch permissions on
+  the server remain the real control where the agents' token allows them.
+
 ## Enforcement reach
 
 A decision only takes effect if the harness bridge reads the response back. As
