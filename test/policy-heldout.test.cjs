@@ -184,12 +184,19 @@ test('H2. the pre-tool gate cannot see that a report contradicts the log (pinned
   assert.deepEqual(rows, [], 'no ledger row records the run or the claim');
 });
 
-test('H2b. GAP: a report that says green after a red run is flagged',
-  { todo: 'needs a post-hoc check of the report against recorded tool outcomes, not a pre-tool rule' }, () => {
-    const { e, rows, root } = shipped();
-    redRunThenGreenReport(e, root);
-    assert.ok(rows.some((r) => r.kind === 'report-contradicts-log'));
+test('H2b. the report check (opt-in, HAG-46) flags a report that says green after a red run', () => {
+  // Not the gate: the gate still cannot see this (H2). The report check records the
+  // run on PostToolUseFailure and checks the message when it is delivered.
+  const { ReportCheck } = loadTs('src/main/reportCheck.ts');
+  const rows = [];
+  const rc = new ReportCheck({ mode: 'dry_run' }, (r) => rows.push(r));
+  rc.recordOutcome({
+    hook_event_name: 'PostToolUseFailure', agent_id: 'agent-a', tool_name: 'Bash',
+    tool_input: { command: 'npm test' }, error: 'Exit code 1\n# pass 40\n# fail 3'
   });
+  rc.checkMessage({ id: 'm1', from: 'agent-a', to: 'god', act: 'inform', subject: 'done', body: 'Done. Suite green, 0 failures.' });
+  assert.ok(rows.some((r) => r.kind === 'report-check-flag' && r.verdict === 'contradicts'));
+});
 
 // --- H3. Merging a pull request is the operator's (Bitbucket, 2026-09-29) ------------
 //

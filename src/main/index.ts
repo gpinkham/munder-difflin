@@ -3883,7 +3883,12 @@ const closingTime = new ClosingTimeController(
   // at their next hook boundary instead of waiting for a Stop.
   control
 );
-hive.setRoutedObserver((msg, targets) => closingTime.onRouted(msg, targets));
+hive.setRoutedObserver((msg, targets) => {
+  try { closingTime.onRouted(msg, targets); } catch { /* observer error */ }
+  // HAG-46: a no-op unless the policy file turns the report check on.
+  hookServer.checkDelivered(msg);
+});
+hive.setCaptureToolFailures(() => hookServer.reportCheckActive());
 ipcMain.handle('app:startClosingTime', () => closingTime.start());
 ipcMain.handle('app:cancelClosingTime', () => closingTime.cancel());
 

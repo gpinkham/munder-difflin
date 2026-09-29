@@ -166,6 +166,54 @@ still records every attempt with rule, agent and timestamp, which is most of the
 value; it does not stop anything there. Prefer `ask` for anything ambiguous anyway
 — a false positive then costs one prompt instead of a blocked action.
 
+## Report check (opt-in, off by default)
+
+A rule sees one tool call before it runs. It cannot see an agent that reports
+"done, suite green" after a red test run. The report check can: it records whether
+each test run passed, and flags a delivered message that claims no failures when
+the sender's last run failed.
+
+It is **off unless the policy file turns it on**, with a top-level block beside
+`rules`:
+
+```json
+{
+  "version": 1,
+  "rules": [ … ],
+  "report_check": { "mode": "dry_run" }
+}
+```
+
+- **Off** (no block, or no policy file): nothing of it runs. Agents' settings files
+  gain no hook, nothing is recorded, no row is written, nobody is told.
+- **`dry_run`**: writes `report-check-outcome` and `report-check-flag` rows to
+  `log.jsonl`. Use it for a week and read every flag before going live.
+- **`live`**: the same rows, and god gets one note per contradiction. It **never
+  blocks**: the message is always delivered.
+- With no `mode`, it takes `defaults.mode`. A `mode` other than `dry_run` or `live`
+  fails the whole policy load, like any other bad rule.
+
+What it keeps is deliberately thin:
+- **Outcome row:** the runner (`npm test`, `node --test`, `pytest`, `jest`, `vitest`,
+  `go test`, `cargo test`, `make test`), pass or fail, and one integer, the failure
+  count from the runner's summary line. No output, no test names, and a digest of
+  the command rather than the command itself.
+- **Flag row:** the claim words that matched, not the message.
+
+What counts as a claim: only a claim of **zero failures** ("suite green", "all tests
+pass", "0 failures"). "Done", "clean" and "no new failures" do not count, so an
+honest report on a repo with known failing tests is not flagged. A claim negated in
+its own sentence, or inside quotes, is ignored. A claim with no recorded run is
+logged as `unsupported` and never sent to god.
+
+Changes take effect on restart, like the rules. Agents spawned before the restart
+keep their old settings, so **respawn them** to pick up the failure hook: a failed
+run arrives on `PostToolUseFailure`, which is registered only when this is on.
+
+Known gaps: a run inside a subagent, a test script run from a file, and a runner not
+in the list are not recorded. `|| true` hides a failure unless the summary line
+shows a count.
+
 ## Why JSON and not YAML
 
 JSON parses with no dependency. Adding a YAML parser would add a runtime dependency

@@ -1194,6 +1194,10 @@ export class HiveManager {
     return Array.from(new Set(out));
   }
 
+  private captureToolFailuresSafe(): boolean {
+    try { return this.captureToolFailures() === true; } catch { return false; }
+  }
+
   private hookSettings(shim: string, cwd: string, cfg: McpDefaultsMap, theme?: 'light' | 'dark', writableDirs: string[] = []): unknown {
     // Bundled node, NOT bare `node` — see nodeLauncherPath(). Claude runs each of
     // these through `sh -c` with a stripped PATH, where `node` is often absent.
@@ -1248,6 +1252,9 @@ export class HiveManager {
         SubagentStop: [entry()],
         PreToolUse: [entry('*')],
         PostToolUse: [entry('*')],
+        // A failed Bash call arrives here, not on PostToolUse. Only the opt-in report
+        // check needs it, so it is registered only when that check is on.
+        ...(this.captureToolFailuresSafe() ? { PostToolUseFailure: [entry('*')] } : {}),
         UserPromptSubmit: [entry()],
         Notification: [entry()],
         SessionStart: [entry()],
@@ -1699,6 +1706,13 @@ export class HiveManager {
   /** Observer invoked for EVERY routed message with its resolved targets.
    *  Used by main-process features that react to hive traffic (closing time). */
   private routedObserver: ((msg: HiveMessage, targets: string[]) => void) | null = null;
+  /** HAG-46: whether to register PostToolUseFailure for Claude agents. It is off by
+   *  default so every agent's settings file stays exactly as it was unless the
+   *  policy file turns the report check on. */
+  private captureToolFailures: () => boolean = () => false;
+  setCaptureToolFailures(fn: () => boolean): void {
+    this.captureToolFailures = fn;
+  }
   setRoutedObserver(cb: ((msg: HiveMessage, targets: string[]) => void) | null): void {
     this.routedObserver = cb;
   }

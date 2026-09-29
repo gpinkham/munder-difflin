@@ -21,6 +21,7 @@ import type { CircuitBreaker } from './breaker';
 import { estimateCostUsd } from './pricing';
 import { validateHookEvent } from '../shared/hookEvents';
 import { PolicyEngine, type AgentWorkspace, type PolicyStatus } from './policy';
+import { ReportCheck, REPORT_CHECK_SENDER, type ReportMessage } from './reportCheck';
 
 /** Maximum JSON payload bytes in one newline-delimited hook frame. */
 const MAX_HOOK_FRAME_BYTES = 256 * 1024;
@@ -49,6 +50,11 @@ interface HookPayload {
   output?: number;
   cache_read?: number;
   cache_creation?: number;
+  /** PostToolUse: what the tool returned (Bash: stdout/stderr/interrupted). */
+  tool_response?: { stdout?: unknown; stderr?: unknown; interrupted?: unknown } | null;
+  /** PostToolUseFailure: "Exit code N\n<output>", and whether the user interrupted. */
+  error?: unknown;
+  is_interrupt?: unknown;
 }
 
 /**
@@ -133,6 +139,9 @@ export class HookServer {
    *  policy file pays nothing, and so tests that construct a HookServer without a
    *  hive root behave exactly as before. */
   private policy: PolicyEngine | null = null;
+  /** The report check (HAG-46), built only when the policy file turns it on.
+   *  `undefined` = not decided yet; `null` = off for this daemon's life. */
+  private reportChecker: ReportCheck | null | undefined = undefined;
 
   constructor(
     private hive: HiveManager,
@@ -312,6 +321,33 @@ export class HookServer {
     return this.policy;
   }
 
+  /** The report check, or null when the policy file does not turn it on. Decided
+   *  once, like the policy load itself: an edit takes effect on restart. */
+  private reportCheck(): ReportCheck | null {
+    if (this.reportChecker === undefined) {
+      const cfg = this.policyEngine().reportCheck;
+      this.reportChecker = cfg
+        ? new ReportCheck(
+          cfg,
+          (row) => this.hive.appendLog(row as Parameters<HiveManager['appendLog']>[0]),
+          (subject, body) => { this.hive.send({ to: 'god', act: 'inform', subject, body }, REPORT_CHECK_SENDER); }
+        )
+        : null;
+    }
+    return this.reportChecker;
+  }
+
+  /** True when the policy file turns the report check on. The hive asks this when it
+   *  writes an agent's hook settings, to decide whether to register PostToolUseFailure. */
+  reportCheckActive(): boolean {
+    try { return this.reportCheck() !== null; } catch { return false; }
+  }
+
+  /** Called for every delivered hive message. A no-op unless the check is on. */
+  checkDelivered(msg: ReportMessage): void {
+    try { this.reportCheck()?.checkMessage(msg); } catch { /* never affect delivery */ }
+  }
+
   stop(): void {
     // Flush the false-positive denominator before the daemon goes away.
     try { this.policy?.flushStats(); } catch { /* noop */ }
@@ -418,6 +454,18 @@ export class HookServer {
     // A repeated identical (name+input) PostToolUse is the runaway-loop tell.
     if (event === 'PostToolUse' && agentId) {
       this.breaker?.recordToolUse(agentId, p.tool_name, p.tool_input);
+    }
+
+    // HAG-46 report check: record test outcomes. Off unless the policy file turns it
+    // on, and PostToolUseFailure is only registered for agents when it is.
+    if ((event === 'PostToolUse' || event === 'PostToolUseFailure' || event === 'SessionStart') && agentId) {
+      try {
+        const rc = this.reportCheck();
+        if (rc) {
+          if (event === 'SessionStart') rc.sessionStarted(agentId);
+          else rc.recordOutcome({ ...p, agent_id: agentId });
+        }
+      } catch { /* the check must never break a hook */ }
     }
 
     // A human just spoke to this agent (issue #376): stamp the third progress

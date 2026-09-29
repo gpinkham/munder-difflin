@@ -225,6 +225,12 @@ export interface PolicyFile {
   version?: number;
   defaults?: { mode?: PolicyMode; on_error?: 'allow' | 'deny' };
   rules?: PolicyRule[];
+  /**
+   * Opt-in (HAG-46): check completion reports against recorded test outcomes. Absent
+   * means off, and off means nothing of it runs: no extra hook, no outcome capture,
+   * no rows. dry_run writes rows only; live also tells god. It never blocks.
+   */
+  report_check?: { mode?: PolicyMode };
 }
 
 /** Per-evaluation scratch, so one payload is parsed once however many rules read it. */
@@ -349,6 +355,8 @@ export class PolicyEngine {
   private configured = false;
   private defaults: { mode: PolicyMode; on_error: 'allow' | 'deny' } = { mode: 'dry_run', on_error: 'allow' };
   private loadedAt: string | null = null;
+  /** The report check's settings, or null when the policy file does not turn it on. */
+  private reportCheckConfig: { mode: PolicyMode } | null = null;
 
   /** Denominator for the false-positive rate. Counted in memory, never logged
    *  per action: allows are the overwhelming majority and appendLog is a
@@ -384,6 +392,7 @@ export class PolicyEngine {
     this.loadError = null;
     this.configured = false;
     this.loadedAt = null;
+    this.reportCheckConfig = null;
     if (!this.policyDir) return;
     const enginePath = join(this.policyDir, ENGINE_POLICY_FILE);
     const legacyPath = join(this.policyDir, LEGACY_POLICY_FILE);
@@ -450,6 +459,18 @@ export class PolicyEngine {
       this.fail(invalid.map((i) => `${i.id}: ${i.why}`).join('; '), invalid);
       return; // all-or-nothing: a policy you cannot fully trust is not loaded
     }
+    const rc = parsed.report_check;
+    if (rc !== undefined) {
+      const mode = rc === null || typeof rc !== 'object' || Array.isArray(rc) ? undefined : (rc as { mode?: unknown }).mode;
+      if (mode !== undefined && mode !== 'dry_run' && mode !== 'live') {
+        this.fail(`report_check.mode must be dry_run or live, got ${JSON.stringify(mode)}`);
+        return;
+      }
+      if (rc === null || typeof rc !== 'object' || Array.isArray(rc)) {
+        this.fail('report_check must be an object, e.g. { "mode": "dry_run" }');
+        return;
+      }
+    }
     if (!rules.length) {
       // A policy file that exists but names no rules is a truncated write or a bad
       // hand edit far more often than a deliberate choice, and it enforces nothing.
@@ -463,6 +484,7 @@ export class PolicyEngine {
     if (parsed.defaults?.on_error) this.defaults.on_error = parsed.defaults.on_error;
     this.rules = rules;
     this.loadedAt = new Date().toISOString();
+    if (rc) this.reportCheckConfig = { mode: (rc.mode ?? this.defaults.mode) as PolicyMode };
 
     const gaps = this.unenforceableProviders();
     this.log({
@@ -473,6 +495,8 @@ export class PolicyEngine {
       // Named, not a static warning. A generic "some providers may not be
       // governed" gets skimmed; a list of the agents running right now does not.
       unenforceable_providers: gaps,
+      // Only when turned on, so a policy without it logs exactly the row it always did.
+      ...(this.reportCheckConfig ? { report_check: this.reportCheckConfig.mode } : {}),
     });
   }
 
@@ -947,6 +971,8 @@ export class PolicyEngine {
   /** Whether a policy file was found. False means fully inert: HookServer skips
    *  the engine entirely, so an unconfigured install evaluates nothing. */
   get active(): boolean { return this.configured; }
+  /** Non-null only when a policy file loaded cleanly AND turned the report check on. */
+  get reportCheck(): { mode: PolicyMode } | null { return this.reportCheckConfig; }
   get ruleCount(): number { return this.rules.length; }
   get error(): string | null { return this.loadError; }
   get path(): string { return this.policyPath; }
