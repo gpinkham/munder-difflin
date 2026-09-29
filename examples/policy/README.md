@@ -180,18 +180,22 @@ matching branch, resolved the way git resolves it: the current branch,
 uses it; put it after `protected-branch-push`.
 
 - **Inert unless used.** Git runs only when a loaded rule has this key, and only for a
-  `git push`. Each git call has a 2-second timeout.
-- **Fails toward the rule.** An unknown flag, a variable, a `GIT_DIR`/`GIT_CONFIG_*`
-  override, a directory it cannot resolve, or a git that fails or hangs makes the rule
-  error, and its `on_error` decides. Where git would refuse the push anyway (a
+  `git push`: two calls (three for `matching` or `--all`), under one 3-second deadline,
+  since it runs in front of the tool call.
+- **Fails toward the rule.** An unknown flag, a variable, brace expansion, an inline
+  alias (`-c alias.p=push`), a `GIT_DIR`/`GIT_CONFIG_*`/`HOME`/`XDG_CONFIG_HOME`
+  override, `env` with an option (`-i`, `-C`), a directory it cannot resolve, or a git
+  that fails or runs past the deadline makes the rule error, and its `on_error`
+  decides. A `-c include.path=…` is read, as git reads it. Where git would refuse the push anyway (a
   `simple` push to a differently named upstream), the upstream still counts.
-- **A dry run is not a destination.** `--mirror`, `--prune` and a wildcard
-  destination count as every branch.
+- **A dry run is not a destination** (the last of `-n`/`--dry-run`/`--no-dry-run`
+  wins). `--mirror`, `remote.<name>.mirror`, `--prune` and a wildcard destination count
+  as every branch; `heads/master` counts as `master`.
 - **Needs this engine.** An older engine rejects the unknown matcher and, with it, the
   whole policy file.
 - **Not covered:** `pushd`, a `cd` inside a subshell leaking into a later command, an
-  alias, a script file, and git config the harness reads differently from the agent's
-  shell (a different `HOME`).
+  alias defined in git config or the shell, a script file, and an environment the
+  agent's shell set up earlier (an exported `HOME`) that the harness does not share.
 
 ## Enforcement reach
 

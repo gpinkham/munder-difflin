@@ -46,7 +46,7 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { canonicalAction, GrantStore, GRANT_CLASSES, gitInspector, type Grant, type GitInspector } from './grants';
-import { branchGlob, GIT_ENV, pushTargets, realPushGit, type PushGit } from './pushDestination';
+import { branchGlob, ENV_OVERRIDE, pushTargets, realPushGit, type PushGit } from './pushDestination';
 import {
   effectiveCommands, realAbsolute, inlineScript, scriptLiterals, scriptWrites, operandsOf, verbOf,
   STRUCTURAL_UNRESOLVED, type EffectiveCommand, type Unresolved,
@@ -929,10 +929,12 @@ export class PolicyEngine {
       const raw = String(((p.tool_input ?? {}) as Record<string, unknown>).command ?? '');
       let hit = false;
       for (const c of this.commands(p, ctx)) {
-        if (c.argv[0] !== 'git' || !c.argv.includes('push')) continue;
-        // The parser drops env assignments, and GIT_DIR or GIT_CONFIG_* change which
-        // repo and config the push reads. Throws: on_error decides.
-        if (GIT_ENV.test(raw)) throw new Error('push destination unknown: a GIT_* environment override');
+        // An inline alias (-c alias.p=push, --config-env) can push with no "push" word.
+        const alias = c.argv.some((a) => /^alias\./i.test(a) || a.startsWith('--config-env'));
+        if (c.argv[0] !== 'git' || (!c.argv.includes('push') && !alias)) continue;
+        // The parser drops env assignments and env's options, and GIT_DIR, HOME or
+        // env -C change which repo and config the push reads. Throws: on_error decides.
+        if (ENV_OVERRIDE.test(raw)) throw new Error('push destination unknown: an environment override');
         const t = pushTargets(c.argv, c.cwd ?? null, this.pushGit);
         if (t && (t.any || t.branches.some((b) => globs.some((g) => g.test(b))))) { hit = true; break; }
       }

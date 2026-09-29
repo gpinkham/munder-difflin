@@ -217,3 +217,38 @@ test('D15. pushTargets reads a push the way git does (unit)', (t) => {
   assert.equal(at(['git', 'status']), null);
   assert.equal(at(['git', 'push', '--dry-run']), null);
 });
+
+test('D16. config the push reads from elsewhere is followed or refused (Dwight, HAG-53)', (t) => {
+  const r = repo(t, { branch: 'feat/x' });
+  const inc = path.join(tmp(t, 'md-pushdst-inc-'), 'extra.cfg');
+  fs.writeFileSync(inc, '[remote "origin"]\n\tpush = refs/heads/feat/x:refs/heads/master\n');
+  const { e } = engine(t);
+  // An include pulled in with -c is read, as git reads it.
+  assert.equal(decide(e, `git -c include.path=${inc} push origin feat/x`, r).decision, 'deny');
+  // A mirror remote pushes everything, deletes included.
+  assert.equal(decide(e, 'git push origin', repo(t, { branch: 'feat/x', config: { 'remote.origin.mirror': 'true' } })).decision, 'deny');
+  // A different HOME, config home or environment, an inline alias, and env -C are unreadable.
+  for (const command of ['HOME=/tmp/h git push origin feat/x', 'XDG_CONFIG_HOME=/tmp/x git push origin feat/x', 'env -i git push origin feat/x',
+    `env -C ${r} git push`, 'git -c alias.p=push p', 'git -c alias.p=push p origin HEAD', 'git --config-env=alias.p=P p']) {
+    const v = decide(e, command, r);
+    assert.equal(v.decision, 'deny', command);
+    assert.equal(v.matchedOn, 'error', command);
+  }
+  // An alias that is not in play, and HOME set for something that is not a push, change nothing.
+  assert.equal(decide(e, 'HOME=/tmp/h ls', r).decision, 'allow');
+});
+
+test('D17. a bare push costs at most three git calls, under one shared deadline', (t) => {
+  const calls = [];
+  const spy = { run: (dir, args, timeout) => { calls.push({ args, timeout }); return realPushGit.run(dir, args, timeout); } };
+  const { e } = engine(t, [RULE], spy);
+  assert.equal(decide(e, 'git push', repo(t)).decision, 'deny');
+  assert.ok(calls.length <= 3, JSON.stringify(calls.map((c) => c.args)));
+  assert.ok(calls.every((c) => c.timeout > 0 && c.timeout <= 3000), JSON.stringify(calls));
+  // Once the budget is spent the next call is not made: it errors instead.
+  let now = 0;
+  const slow = { now: () => now, run: (dir, args, timeout) => { now += 3001; return realPushGit.run(dir, args, timeout); } };
+  const v = decide(engine(t, [RULE], slow).e, 'git push', repo(t));
+  assert.equal(v.matchedOn, 'error');
+});
+

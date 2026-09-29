@@ -21,17 +21,23 @@ import { isAbsolute, join } from 'node:path';
 
 /** How the matcher runs git. Injected by tests. */
 export interface PushGit {
-  /** stdout of `git -C <dir> <args>`, trimmed; null when git exits 1 (unset key,
-   *  detached HEAD). Throws on any other failure, including a timeout. */
-  run(dir: string, args: string[]): string | null;
+  /** stdout of `git -C <dir> <args>`; null when git exits 1 (detached HEAD).
+   *  Throws on any other failure, including running past `timeoutMs`. */
+  run(dir: string, args: string[], timeoutMs: number): string | null;
+  /** The clock the shared deadline is measured on. Tests supply one. */
+  now?(): number;
 }
 
+/** One deadline for every git call a push costs. This runs on the main process,
+ *  so a hung git must not stall it for longer than this. */
+const BUDGET_MS = 3000;
+
 export const realPushGit: PushGit = {
-  run(dir, args) {
+  run(dir, args, timeoutMs) {
     try {
       return execFileSync('git', ['-C', dir, ...args], {
-        timeout: 2000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim();
+        timeout: timeoutMs, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      });
     } catch (e) {
       if ((e as { status?: number }).status === 1) return null;
       throw e;
@@ -60,8 +66,9 @@ const PUSH_VALUED = new Set(['--repo', '--receive-pack', '--exec', '--push-optio
 const PUSH_ATTACHED = /^--(repo|receive-pack|exec|push-option|force-with-lease|signed|recurse-submodules)=/;
 const SHORT = new Set(['v', 'q', 'n', 'f', 'u', 'd', '4', '6']);
 
-/** -c keys that can change where a push lands; any other -c is not passed to git. */
-const RELEVANT_KEY = /^(push|remote|branch)\./i;
+/** -c keys that can change where a push lands (an include can set any of them);
+ *  any other -c is not passed to git. */
+const RELEVANT_KEY = /^(push|remote|branch|include|includeif)\./i;
 
 const unreadable = (why: string): never => { throw new Error(`push destination unknown: ${why}`); };
 const noVar = (w: string, what: string) => {
@@ -90,6 +97,8 @@ export function pushTargets(argv: string[], cwd: string | null, git: PushGit = r
     } else if (a === '-c') {
       const kv = argv[++i];
       if (kv === undefined) return isPush() ? unreadable('-c needs key=value') : null;
+      // `git -c alias.p=push p` pushes with no "push" word to find (Dwight, HAG-53).
+      if (/^alias\./i.test(kv)) unreadable('an inline alias');
       if (RELEVANT_KEY.test(kv)) { noVar(kv, '-c'); pre.push('-c', kv); }
     } else if (a === '--git-dir' || a.startsWith('--git-dir=')) {
       const d = a === '--git-dir' ? argv[++i] : a.slice('--git-dir='.length);
@@ -103,7 +112,8 @@ export function pushTargets(argv: string[], cwd: string | null, git: PushGit = r
     } else {
       // --namespace, --config-env, --exec-path=… or something new: we cannot tell
       // what it changes, or even whether the next word is its value.
-      return isPush() ? unreadable(`global option ${a}`) : null;
+      // --config-env can define an alias, so it is unreadable push or not.
+      return isPush() || a.startsWith('--config-env') ? unreadable(`global option ${a}`) : null;
     }
   }
   if (argv[i] !== 'push') return null;
@@ -141,10 +151,19 @@ export function pushTargets(argv: string[], cwd: string | null, git: PushGit = r
   if (!dir) unreadable('the working directory is unknown');
   for (const w of pos) noVar(w, 'the push');
 
-  const run = (args: string[]) => git.run(dir!, [...pre, ...args]);
-  const cfg = (key: string) => run(['config', '--get', key]);
-  const cfgAll = (key: string) => (run(['config', '--get-all', key]) ?? '').split('\n').filter(Boolean);
-  const cur = run(['symbolic-ref', '-q', '--short', 'HEAD']);
+  const clock = () => (git.now ? git.now() : Date.now());
+  const start = clock();
+  const run = (args: string[]) => {
+    const left = BUDGET_MS - (clock() - start);
+    if (left <= 0) unreadable('git took too long');
+    return git.run(dir!, [...pre, ...args], Math.min(2000, left));
+  };
+  // Two calls, whatever the push: the branch, then the whole effective config (with
+  // the -c overrides and includes applied, as git applies them).
+  const cur = run(['symbolic-ref', '-q', '--short', 'HEAD'])?.trim() || null;
+  const config = readConfig(run(['config', '--list', '-z']) ?? '');
+  const cfgAll = (key: string) => config.get(configKey(key)) ?? [];
+  const cfg = (key: string): string | null => { const v = cfgAll(key); return v.length ? v[v.length - 1] : null; };
   const locals = () => (run(['for-each-ref', '--format=%(refname:short)', 'refs/heads/']) ?? '').split('\n').filter(Boolean);
 
   const repo = pos[0] ?? repoOpt ?? ((cur && cfg(`branch.${cur}.pushRemote`)) || cfg('remote.pushDefault')
@@ -154,6 +173,8 @@ export function pushTargets(argv: string[], cwd: string | null, git: PushGit = r
   const configured = isName ? cfgAll(`remote.${repo}.push`) : [];
   const refspecs = pos.slice(1);
 
+  // remote.<name>.mirror makes a plain push behave as --mirror.
+  if (isName && /^(?:true|yes|on|1|)$/i.test(cfg(`remote.${repo}.mirror`) ?? 'false')) return { any: true };
   if (all) return { any: false, branches: locals() };
 
   const out = new Set<string>();
@@ -210,5 +231,33 @@ export function branchGlob(glob: string): RegExp {
   return new RegExp('^' + glob.split('*').map((p) => p.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
 }
 
-/** Env names that change which repo or config a git command uses. */
-export const GIT_ENV = /(?:^|[\s;&|(])(?:export\s+)?GIT_(?:DIR|WORK_TREE|COMMON_DIR|NAMESPACE|CONFIG\w*|INDEX_FILE)=/;
+/**
+ * A call that changes which repo or config git reads: GIT_DIR/GIT_CONFIG_*, HOME and
+ * XDG_CONFIG_HOME (the global config), or env with an option (-i clears the
+ * environment, -C moves the directory). The parser drops all of these.
+ */
+export const ENV_OVERRIDE =
+  /(?:^|[\s;&|(])(?:export\s+)?(?:GIT_(?:DIR|WORK_TREE|COMMON_DIR|NAMESPACE|CONFIG\w*|INDEX_FILE)|HOME|XDG_CONFIG_HOME)=|(?:^|[\s;&|(])env\s+-/;
+
+/** `git config --list -z`: key NUL-terminated entries, value after the first newline;
+ *  a key with no value is a boolean true. */
+function readConfig(out: string): Map<string, string[]> {
+  const m = new Map<string, string[]>();
+  for (const entry of out.split('\0')) {
+    if (!entry) continue;
+    const nl = entry.indexOf('\n');
+    const key = configKey(nl < 0 ? entry : entry.slice(0, nl));
+    const value = nl < 0 ? '' : entry.slice(nl + 1);
+    m.set(key, [...(m.get(key) ?? []), value]);
+  }
+  return m;
+}
+
+/** Section and variable names are case-insensitive; a subsection is not. */
+function configKey(key: string): string {
+  const first = key.indexOf('.');
+  const last = key.lastIndexOf('.');
+  if (first < 0) return key.toLowerCase();
+  if (first === last) return key.toLowerCase();
+  return key.slice(0, first).toLowerCase() + key.slice(first, last) + key.slice(last).toLowerCase();
+}
