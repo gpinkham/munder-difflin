@@ -128,6 +128,20 @@ test('H1f. --dry-run given as the VALUE of a flag does not exempt a real push', 
   assert.equal(e.evaluate(pre('Bash', { command: 'git push -v --dry-run' })).decision, 'ask');
 });
 
+test('H1h. a push is still asked about when a dry run is cancelled, or hidden behind a git option with a value (Dwight, HAG-50)', () => {
+  const { e } = shipped();
+  for (const command of [
+    'git push --dry-run --no-dry-run origin main',
+    "git push -o 'x --dry-run y' origin main",
+    'git push --push-option="a --dry-run" origin main',
+    'git --git-dir /r/.git push origin main',
+    'git --work-tree /r push origin main',
+    'git --git-dir /r/.git --work-tree /r push origin main',
+  ]) {
+    assert.equal(e.evaluate(pre('Bash', { command })).decision, 'ask', command);
+  }
+});
+
 test('H1g. reads, local calls and real dry runs near those shapes still pass', () => {
   const { e } = shipped();
   for (const command of [
@@ -286,4 +300,24 @@ test('H3b. ordinary pull-request work and reads of the merge endpoint are not de
 test('H3c. GAP: a merge made by a script file is not seen', { todo: 'the engine reads the command, not the script it runs' }, () => {
   const { e } = shipped();
   assert.equal(e.evaluate(pre('Bash', { command: 'python3 scripts/merge_pr.py 12' })).decision, 'deny');
+});
+
+test('H4. the shipped command patterns run in linear time: a crafted command cannot stall the main process', () => {
+  // bitbucket-merge as first shipped retried its flag loop from every `pr`: `bb` + `pr -x `
+  // repeated took 285 ms at 30k characters and grew with the square of the length.
+  const pack = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'examples/policy/engine.example.json'), 'utf8'));
+  // remote-push's git-option loop read `--x` two ways, so `git` + N double-dash flags + a
+  // non-push word was exponential: 24 flags (106 characters) took 6.3 s.
+  const SHAPES = [['bb ', 'pr -x '], ['bb ', 'pr -x y '], ['BB -x ', 'pr '], ['git push ', '-o x '], ['gh api ', '-f x '],
+    ['git ', '--x '], ['git ', '-C '], ['git ', '--git-dir '], ['git -C x ', '--request '], ['git ', '-c ']];
+  for (const r of pack.rules.filter((x) => x.match.command_matches)) {
+    const re = new RegExp(r.match.command_matches);
+    for (const [head, unit] of SHAPES) {
+      const s = head + unit.repeat(Math.ceil(60000 / unit.length)) + 'Q';
+      const t = Date.now();
+      re.test(s);
+      re.test(head + unit.repeat(40) + 'status');
+      assert.ok(Date.now() - t < 150, `${r.id}: ${JSON.stringify(head)} + ${JSON.stringify(unit)} x 60k chars took ${Date.now() - t} ms`);
+    }
+  }
 });
