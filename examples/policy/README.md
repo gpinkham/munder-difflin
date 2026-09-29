@@ -169,6 +169,30 @@ into `engine.json` **ahead of `remote-push`**. It needs no engine change.
   git config, an alias and a script file are not seen either. Branch permissions on
   the server remain the real control where the agents' token allows them.
 
+### Where a push lands (`push_destination`, opt-in)
+
+The `push_destination` matcher closes that gap. Give it branch globs (`*` matches any
+run of characters, `/` included) and it fires on a `git push` that would update a
+matching branch, resolved the way git resolves it: the current branch,
+`push.default` (including a `-c` override on the command), the upstream,
+`remote.pushDefault` and `remote.<name>.push`, in the repo the push runs in (after
+`-C` and `cd`). [`protected-branch-push-resolved.rule.json`](protected-branch-push-resolved.rule.json)
+uses it; put it after `protected-branch-push`.
+
+- **Inert unless used.** Git runs only when a loaded rule has this key, and only for a
+  `git push`. Each git call has a 2-second timeout.
+- **Fails toward the rule.** An unknown flag, a variable, a `GIT_DIR`/`GIT_CONFIG_*`
+  override, a directory it cannot resolve, or a git that fails or hangs makes the rule
+  error, and its `on_error` decides. Where git would refuse the push anyway (a
+  `simple` push to a differently named upstream), the upstream still counts.
+- **A dry run is not a destination.** `--mirror`, `--prune` and a wildcard
+  destination count as every branch.
+- **Needs this engine.** An older engine rejects the unknown matcher and, with it, the
+  whole policy file.
+- **Not covered:** `pushd`, a `cd` inside a subshell leaking into a later command, an
+  alias, a script file, and git config the harness reads differently from the agent's
+  shell (a different `HOME`).
+
 ## Enforcement reach
 
 A decision only takes effect if the harness bridge reads the response back. As

@@ -46,6 +46,7 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { canonicalAction, GrantStore, GRANT_CLASSES, gitInspector, type Grant, type GitInspector } from './grants';
+import { branchGlob, GIT_ENV, pushTargets, realPushGit, type PushGit } from './pushDestination';
 import {
   effectiveCommands, realAbsolute, inlineScript, scriptLiterals, scriptWrites, operandsOf, verbOf,
   STRUCTURAL_UNRESOLVED, type EffectiveCommand, type Unresolved,
@@ -67,6 +68,7 @@ const MATCHERS = [
   'command_matches',
   'command_not_matches',
   'path_in_other_agent_workspace',
+  'push_destination',
 ] as const;
 
 /** Verbs whose written targets are removed wholesale, as opposed to written into. */
@@ -228,6 +230,14 @@ export interface PolicyRule {
      * agent's root, is nobody's: see `ownedRoots`.
      */
     path_in_other_agent_workspace?: boolean;
+    /**
+     * Opt-in (HAG-53): branch globs (`*` = any run of characters). Fires when a Bash
+     * call runs a git push that would update a matching branch, resolved the way git
+     * resolves it: the current branch, push.default, the upstream, remote.<name>.push.
+     * Git is run only for a push, and only when a rule uses this key. When the
+     * destination cannot be read, the rule errors and its on_error decides.
+     */
+    push_destination?: string[];
   };
 }
 
@@ -394,7 +404,9 @@ export class PolicyEngine {
      *  harness supplies the config, where it defaults ON. */
     private corpusEnabled: () => boolean = () => false,
     /** How the grant check reads a repo (push url, push risks). Injected by tests. */
-    private gitInspect: GitInspector = gitInspector
+    private gitInspect: GitInspector = gitInspector,
+    /** How `push_destination` runs git. Injected by tests. */
+    private pushGit: PushGit = realPushGit
   ) {
     this.hiveRoot = hiveRoot;
     this.policyDir = hiveRoot ? join(hiveRoot, 'policy') : '';
@@ -566,6 +578,10 @@ export class PolicyEngine {
     for (const k of ['command_matches', 'command_not_matches'] as const) {
       const r = rule.match[k];
       if (r) { try { new RegExp(r); } catch (e) { return `${k} is not a valid regex: ${String(e)}`; } }
+    }
+    const pd = rule.match.push_destination;
+    if (pd !== undefined && (!Array.isArray(pd) || !pd.length || pd.some((g) => typeof g !== 'string' || !g))) {
+      return 'push_destination must be a non-empty array of branch globs, e.g. ["master", "production-*"]';
     }
     if (rule.mode && rule.mode !== 'dry_run' && rule.mode !== 'live') return `mode must be dry_run or live, got ${String(rule.mode)}`;
     if (rule.on_error && rule.on_error !== 'allow' && rule.on_error !== 'deny') return `on_error must be allow or deny, got ${String(rule.on_error)}`;
@@ -905,6 +921,23 @@ export class PolicyEngine {
       });
       if (!foreign) return null;
       matchedOn = 'path_in_other_agent_workspace';
+    }
+
+    if (m.push_destination !== undefined) {
+      if (p.tool_name !== 'Bash') return null;
+      const globs = m.push_destination.map(branchGlob);
+      const raw = String(((p.tool_input ?? {}) as Record<string, unknown>).command ?? '');
+      let hit = false;
+      for (const c of this.commands(p, ctx)) {
+        if (c.argv[0] !== 'git' || !c.argv.includes('push')) continue;
+        // The parser drops env assignments, and GIT_DIR or GIT_CONFIG_* change which
+        // repo and config the push reads. Throws: on_error decides.
+        if (GIT_ENV.test(raw)) throw new Error('push destination unknown: a GIT_* environment override');
+        const t = pushTargets(c.argv, c.cwd ?? null, this.pushGit);
+        if (t && (t.any || t.branches.some((b) => globs.some((g) => g.test(b))))) { hit = true; break; }
+      }
+      if (!hit) return null;
+      matchedOn = 'push_destination';
     }
 
     return matchedOn;

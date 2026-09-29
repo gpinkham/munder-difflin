@@ -21,7 +21,7 @@
     "the work you would have judged.",
     "",
     "Matchers: tool | path_glob | path_not_glob | command_matches |",
-    "command_not_matches | path_in_other_agent_workspace. Within a rule every key must match. Rules are tried in",
+    "command_not_matches | path_in_other_agent_workspace | push_destination. Within a rule every key must match. Rules are tried in",
     "file order and the first match wins. For OR, write two rules.",
     "",
     "A Bash command is PARSED before it is matched, so what these matchers see is",

@@ -127,6 +127,9 @@ export interface EffectiveCommand {
   removes: string[];
   /** What this command hides from us. Logged, never enforced on — see policy.ts. */
   unresolved: Unresolved[];
+  /** The directory it runs in, after any `cd` before it; absent when that is not
+   *  known (no cwd from the caller, or a `cd` to a variable). */
+  cwd?: string;
 }
 
 /** Guards against a pathological command turning one hook call into a hang. */
@@ -1145,5 +1148,6 @@ function record(
     // A target holding `$SOMETHING` was resolved against a name we never saw, so the
     // absolute path above is a guess at best. Say so rather than only recording it.
     unresolved: [...unresolved, ...unexpandedVars(writes), ...guessed],
+    ...(ctx.cwdKnown && !ctx.cwd.includes('$') ? { cwd: ctx.cwd } : {}),
   });
 }
