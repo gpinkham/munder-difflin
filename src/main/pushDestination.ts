@@ -74,10 +74,13 @@ const unreadable = (why: string): never => { throw new Error(`push destination u
 const noVar = (w: string, what: string) => {
   if (w.includes('$')) unreadable(`${what} holds a variable (${w})`);
   // The parser does not expand braces: {feat,master} is two refspecs to the shell.
-  // Innermost {…} groups, then their contents: one pass, so a crafted `{,{,{,…`
-  // cannot make it backtrack (the single regex this replaced was cubic).
-  const groups = w.match(/\{[^{}]*\}/g) ?? [];
-  if (groups.some((g) => g.includes(',') || g.includes('..'))) unreadable(`${what} uses brace expansion (${w.slice(0, 80)})`);
+  // Everything between the first { and the last }: nested groups count too, since
+  // bash expands HEAD:{{a}x,master} to HEAD:master (Dwight). No regex, so a crafted
+  // `{,{,{,…` cannot make it backtrack (the single regex this replaced was cubic).
+  const open = w.indexOf('{');
+  const close = w.lastIndexOf('}');
+  const inner = open >= 0 && close > open ? w.slice(open + 1, close) : '';
+  if (inner.includes(',') || inner.includes('..')) unreadable(`${what} uses brace expansion (${w.slice(0, 80)})`);
 };
 
 /**
