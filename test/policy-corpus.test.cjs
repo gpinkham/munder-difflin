@@ -260,6 +260,23 @@ test('md-136 e2e: a corpus write that fails never changes the decision', async (
   assert.equal(v.decision, 'allow', 'dry_run still allows; the corpus never alters a verdict');
 });
 
+test('md-136 e2e: a dry_run row keeps the commands and write paths it was decided on', async (t) => {
+  const { engine, base, corpusRows } = floor(t);
+  const target = path.join(base, 'wt', 'ryan-2', 'notes.md');
+  const v = deny(engine, base, `echo hi > ${target}`);
+  assert.equal(v.mode, 'dry_run', 'precondition: the dry_run branch is the one under test');
+  assert.equal(v.wouldDeny, true, 'precondition: a would-deny is what gets recorded');
+
+  const c = corpusRows();
+  assert.equal(c.length, 1);
+  assert.ok(c[0].commands.length > 0,
+    'the parsed commands the rule judged must reach the row, or a dry_run match records no evidence');
+  assert.equal(c[0].commands[0].argv[0], 'echo');
+  assert.ok(c[0].paths.writes.length > 0, 'the write target that matched must be on the row');
+  assert.ok(c[0].paths.writes.every((w) => w.includes('<agent:other>') && !w.includes('ryan-2')),
+    'and only in its redacted form');
+});
+
 // --- md-136 N1 (Dwight): a flag NAME is a value too -------------------------------
 //
 // The first pass checked flag VALUES and never flag NAMES, so a name went out through

@@ -791,7 +791,7 @@ export class PolicyEngine {
           decision: 'allow', ruleId: rule.id, reason: rule.reason,
           mode, matchedOn: hit, wouldDeny: true, ...(grant ? { grantId: grant.id } : {}),
         };
-        this.record(p, verdict);
+        this.record(p, verdict, ctx);
         return verdict;
       }
       if (grant) {
