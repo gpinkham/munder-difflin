@@ -21,8 +21,10 @@
  *  - never inside the boot sequence (BOOT_GRACE_MS from spawn, mirroring the
  *    renderer's bootGraceUntil),
  *  - delivery paused / agent paused / halted → no nudge (ControlRegistry),
- *  - a recent permission/HITL notification re-arms a block (HITL_REARM_MS) so a
- *    prompt the human is deciding on is never typed into,
+ *  - an open menu (`awaitingAnswer`, from promptGate.ts) blocks nudges for as
+ *    long as it stays open, with no time limit: the nudge's Enter would choose
+ *    "1. Yes" or the first answer. A needsHuman notification also holds for at
+ *    least HITL_REARM_MS,
  *  - a per-worker cooldown (NUDGE_COOLDOWN_MS) so the watchdog and the renderer
  *    nudge don't stack on top of each other.
  *
@@ -48,6 +50,13 @@ export const WORKER_WAKE_HITL_REARM_MS = 5 * 60_000;
 /** A hook event message that means "the agent needs the human" — permission /
  *  approve / confirm prompts (mirrors the renderer's needsHuman detection in
  *  useHive.ts). Anything matching the idle-waiting shape is NOT a HITL hold. */
+/** Hook events that mean the agent moved past any prompt: the tool ran or failed, a
+ *  new prompt was submitted, the turn ended, or the session restarted. The same set
+ *  HookServer uses to close a policy-prompt card. */
+export const WORKER_WAKE_ANSWERED_EVENTS: ReadonlySet<string> = new Set([
+  'PostToolUse', 'PostToolUseFailure', 'UserPromptSubmit', 'Stop', 'SessionStart'
+]);
+
 export type HookClass = 'needsHuman' | 'idle' | null;
 
 export function classifyHook(event: string | undefined, message: string | undefined): HookClass {
@@ -83,6 +92,9 @@ export interface WorkerWakeFacts {
   autoDeliveryPaused: boolean;
   paused: boolean;
   halted: boolean;
+  /** The agent's terminal is at an interactive menu (promptGate.ts): a permission
+   *  prompt, a question, a plan approval. Held for as long as it stays open. */
+  awaitingAnswer?: boolean;
 }
 
 export class WorkerWakeWatchdog {
@@ -135,6 +147,8 @@ export class WorkerWakeWatchdog {
       if (spawned > 0 && now - spawned < WORKER_WAKE_BOOT_GRACE_MS) continue;
       const lastHuman = this.lastHumanNeedsAt.get(f.agentId) ?? 0;
       if (lastHuman > 0 && now - lastHuman < WORKER_WAKE_HITL_REARM_MS) continue;
+      // At a menu (promptGate.ts): no time limit, because the nudge's Enter answers it.
+      if (f.awaitingAnswer) continue;
       const announced = this.announcedInboxIds.get(f.agentId);
       if (announced && !Array.from(inboxIds).some((id) => !announced.has(id))) continue;
       const lastNudge = this.lastNudgeAt.get(f.agentId) ?? 0;

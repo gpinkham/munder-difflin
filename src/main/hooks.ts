@@ -23,6 +23,7 @@ import { validateHookEvent } from '../shared/hookEvents';
 import { PolicyEngine, type AgentWorkspace, type PolicyStatus } from './policy';
 import { ReportCheck, REPORT_CHECK_SENDER, type ReportMessage } from './reportCheck';
 import { GrantDesk, GrantStore, type GrantRequest } from './grants';
+import { WORKER_WAKE_ANSWERED_EVENTS } from './workerWake';
 
 /** The sender name on the approval desk's messages. */
 export const GRANT_DESK_SENDER = 'grant-desk';
@@ -30,7 +31,7 @@ export const GRANT_DESK_SENDER = 'grant-desk';
 /** A policy ask counts as the cause of a permission prompt for this long. */
 const POLICY_PROMPT_WINDOW_MS = 60_000;
 /** Events that mean the agent is past the prompt, whichever way it was answered. */
-const ANSWERED_EVENTS = new Set(['PostToolUse', 'PostToolUseFailure', 'UserPromptSubmit', 'Stop', 'SessionStart']);
+const ANSWERED_EVENTS = WORKER_WAKE_ANSWERED_EVENTS;
 function isPermissionPrompt(p: { notification_type?: string; message?: string }): boolean {
   return p.notification_type === 'permission_prompt' || /needs your permission/i.test(p.message ?? '');
 }
@@ -38,7 +39,7 @@ function isPermissionPrompt(p: { notification_type?: string; message?: string })
 /** Maximum JSON payload bytes in one newline-delimited hook frame. */
 const MAX_HOOK_FRAME_BYTES = 256 * 1024;
 
-interface HookPayload {
+export interface HookPayload {
   hook_event_name?: string;
   agent_id?: string | null;
   session_id?: string;
@@ -172,10 +173,11 @@ export class HookServer {
     /** Standing goal text for an agent (from the durable roster). Optional so
      *  tests can omit it; when set, injected at session start and when changed. */
     private getStandingGoal?: (agentId: string) => string | null,
-    /** Optional observer of every hook boundary (agentId, event, message). The
-     *  worker inbox-wake watchdog (workerWake.ts) feeds on this to learn when an
-     *  agent is parked on a permission/HITL prompt so it never types into it. */
-    private onEvent?: (agentId: string | undefined, event: string, message: string | undefined) => void,
+    /** Optional observer of every hook boundary (agentId, event, message, payload).
+     *  The inbox-wake watchdog (workerWake.ts) and the prompt gate (promptGate.ts)
+     *  feed on this to learn when an agent is parked at a menu, so nothing types
+     *  into it. */
+    private onEvent?: (agentId: string | undefined, event: string, message: string | undefined, payload: HookPayload) => void,
     /** md-146 rules notice. Returns a one-off diff for an agent that has not yet
      *  been told about the current rule revision, or null. Keyed on REVISION and
      *  persisted to disk, so unlike the standing goal it neither decays after a
@@ -407,6 +409,13 @@ export class HookServer {
     return this.desk;
   }
 
+  /** True while a policy ask for this agent is unanswered: it is at Claude Code's
+   *  permission prompt, so nothing may type into its terminal (an Enter would answer
+   *  Yes). Cleared by the same answered events that close its prompt card. */
+  awaitingPolicyAnswer(agentId: string | undefined): boolean {
+    return !!agentId && this.policyAsks.has(agentId);
+  }
+
   /** True when the policy file makes some rule grantable. The UI shows nothing otherwise. */
   grantsActive(): boolean {
     try { return this.grantDesk() !== null; } catch { return false; }
@@ -496,7 +505,7 @@ The approvable form is one Bash call: git [-C <dir>] push <remote> <40-char sha>
   private handle(p: HookPayload): unknown {
     const agentId = p.agent_id ?? undefined;
     const event = p.hook_event_name ?? 'Unknown';
-    this.onEvent?.(agentId, event, p.message);
+    this.onEvent?.(agentId, event, p.message, p);
     if (agentId && typeof p.transcript_path === 'string' && p.transcript_path) {
       this.transcriptPaths.set(agentId, p.transcript_path);
     }

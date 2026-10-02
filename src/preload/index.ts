@@ -594,6 +594,13 @@ const api = {
     ipcRenderer.invoke('pty:spawn', opts),
   writePty: (id: string, data: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('pty:write', id, data),
+  /** Automation's write (queue delivery, seed, boot prompts): refused with
+   *  `promptOpen: true` while the terminal is at an interactive menu, where the
+   *  trailing Enter would choose an answer. The user's keystrokes use writePty. */
+  writePtyAutomated: (id: string, data: string): Promise<{ ok: boolean; error?: string; promptOpen?: boolean }> =>
+    ipcRenderer.invoke('pty:writeAutomated', id, data),
+  /** True while the terminal may be showing an interactive menu (promptGate.ts). */
+  ptyPromptOpen: (id: string): Promise<boolean> => ipcRenderer.invoke('pty:promptOpen', id),
   resizePty: (id: string, cols: number, rows: number): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('pty:resize', id, cols, rows),
   redrawPty: (id: string): Promise<{ ok: boolean; error?: string }> =>

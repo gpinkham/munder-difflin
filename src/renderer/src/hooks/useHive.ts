@@ -145,10 +145,12 @@ function submitToPty(
     // successful (the queue-drain then destroyed the message it had already
     // popped, #36). Surface the failure as a rejection; the chain itself is
     // immune (the prev.catch above absorbs it for the next writer).
-    const wrote = await window.cth.writePty(ptyId, payload);
+    // The automated write: main refuses it while the terminal is at a menu, where
+    // the Enter below would answer a permission prompt or a question for the user.
+    const wrote = await window.cth.writePtyAutomated(ptyId, payload);
     if (!wrote?.ok) throw new Error(wrote?.error ?? `pty write failed: ${ptyId}`);
     await new Promise((r) => setTimeout(r, 140));
-    const submitted = await window.cth.writePty(ptyId, '\r');
+    const submitted = await window.cth.writePtyAutomated(ptyId, '\r');
     if (!submitted?.ok) throw new Error(submitted?.error ?? `pty write failed: ${ptyId}`);
     await new Promise((r) => setTimeout(r, settleMs));
   });
@@ -763,12 +765,20 @@ export function useHive(config: HarnessConfig | null): void {
             useStore.getState().updateAgent(a.id, { seedPrompt: seed });
             return;
           }
+          const requeue = () => {
+            seeded.current.delete(a.id);
+            useStore.getState().updateAgent(a.id, { seedPrompt: seed });
+          };
           submitToPty(
             ptyId,
             withStandingGoal(live, seed),
             inferAgentProvider(live.command, live.provider)
           )
-            .catch(() => { /* pty may have died */ });
+            // Refused because the terminal is at a menu: put the seed back for a
+            // later tick, like the 'waiting' case above. Otherwise the pty died.
+            .catch((e: unknown) => {
+              if (e instanceof Error && e.message === 'prompt-open') requeue();
+            });
         }, SEED_BOOT_MS);
       }
     }, 1500);
@@ -823,6 +833,10 @@ export function useHive(config: HarnessConfig | null): void {
       // one does we simply type after whatever is there — automation never
       // erases the user's text and never closes the user's menu.
       if (!isTerminalAutomationSafe(target.ptyId, now)) return { sent: false };
+      // An interactive menu (permission prompt, question, plan approval) holds
+      // delivery until it is answered, whatever the agent's status says: a breaker
+      // pin keeps status 'looping', which canDeliverToAgent lets through once quiet.
+      if (await window.cth.ptyPromptOpen(target.ptyId)) return { sent: false };
       if (now - (lastFlush.current[target.id] ?? 0) < FLUSH_COOLDOWN_MS) return { sent: false };
       // Last gate before we type: re-check the message's delivery-time
       // precondition. A queue item is decided at enqueue time and delivered an
@@ -868,6 +882,9 @@ export function useHive(config: HarnessConfig | null): void {
           delete sendFailures[next.id];
           return { sent: true, message: next };
         }
+        // A menu opened between the check above and the write: main refused it.
+        // That is a hold, not a failure, so it never counts toward dropping.
+        if (await window.cth.ptyPromptOpen(target.ptyId)) return { sent: false };
         // Failed write (dead/crashed pty the store still thinks is idle): retry
         // on the next cooldown-spaced flush, but only MAX_SEND_ATTEMPTS times —
         // then drop LOUDLY so the loss is diagnosable. (#113/#36)

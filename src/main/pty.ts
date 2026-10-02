@@ -800,6 +800,11 @@ export class PtyManager {
     }));
   }
 
+  /** The last TAIL_MAX bytes this PTY printed, or undefined if no such PTY. */
+  outputTail(id: string): string | undefined {
+    return this.sessions.get(id)?.tail;
+  }
+
   /** Epoch ms of this PTY's most recent output, or undefined if no such PTY. */
   lastOutputAt(id: string): number | undefined {
     return this.sessions.get(id)?.lastOutputAt;
