@@ -387,7 +387,7 @@ export class HookServer {
   }
 
   /** The agent moved on, so the prompt was answered: close its card. */
-  private settlePolicyPrompt(agentId: string): void {
+  private settlePolicyPrompt(agentId: string, answer = 'Answered in the terminal.'): void {
     const ask = this.policyAsks.get(agentId);
     if (!ask) return;
     this.policyAsks.delete(agentId);
@@ -395,7 +395,7 @@ export class HookServer {
     try {
       const now = new Date().toISOString();
       const task = ((this.hive.tasks() as { tasks?: HiveTask[] })?.tasks ?? []).find((t) => t?.id === ask.cardId);
-      const qa = (task?.humanQA ?? []).map((e: HumanQA) => (e.a ? e : { ...e, a: 'Answered in the terminal.', answeredAt: now }));
+      const qa = (task?.humanQA ?? []).map((e: HumanQA) => (e.a ? e : { ...e, a: answer, answeredAt: now }));
       this.hive.patchTask(ask.cardId, { status: 'done', humanQA: qa });
     } catch { /* best-effort */ }
   }
@@ -414,6 +414,12 @@ export class HookServer {
    *  Yes). Cleared by the same answered events that close its prompt card. */
   awaitingPolicyAnswer(agentId: string | undefined): boolean {
     return !!agentId && this.policyAsks.has(agentId);
+  }
+
+  /** The permission prompt went away with no hook (Esc fires none): main saw the
+   *  input box again on a quiet terminal. Settle the ask and close its card. */
+  dismissPolicyAsk(agentId: string | undefined): void {
+    if (agentId) this.settlePolicyPrompt(agentId, 'Dismissed in the terminal.');
   }
 
   /** True when the policy file makes some rule grantable. The UI shows nothing otherwise. */

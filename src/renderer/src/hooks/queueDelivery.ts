@@ -1,15 +1,42 @@
-/** Run one queued delivery and acknowledge it only after the sender resolves.
- * Rejections deliberately leave the queue item untouched for the next retry. */
+/**
+ * Run one queued delivery and acknowledge it only after the sender resolves;
+ * a rejection leaves the queue item untouched for the next retry. A write main refused because the
+ * terminal is at a menu comes back as 'held': that is a wait, not a failure, and
+ * the caller must not count it toward dropping the message. The reason is carried
+ * out of the attempt, because a menu can close before any re-check would run.
+ */
 export async function deliverWithAcknowledgement(
   send: () => Promise<void>,
   acknowledge: () => void
-): Promise<boolean> {
+): Promise<boolean | 'held'> {
   try {
     await send();
     acknowledge();
     return true;
-  } catch {
-    return false;
+  } catch (e) {
+    return e instanceof Error && e.message === 'prompt-open' ? 'held' : false;
+  }
+}
+
+/**
+ * Run `send` again while main holds it at a menu ('prompt-open'), up to
+ * `maxTries` attempts `waitMs` apart; any other failure ends it at once. For the
+ * one-shot writes nothing re-queues, like god's boot prompts.
+ */
+export async function retryWhileHeld(
+  send: () => Promise<void>,
+  { waitMs = 2_000, maxTries = 150, sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms)) }:
+    { waitMs?: number; maxTries?: number; sleep?: (ms: number) => Promise<void> } = {}
+): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await send();
+      return;
+    } catch (e) {
+      const held = e instanceof Error && e.message === 'prompt-open';
+      if (!held || attempt >= maxTries) throw e;
+      await sleep(waitMs);
+    }
   }
 }
 

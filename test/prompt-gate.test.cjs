@@ -129,3 +129,90 @@ test('a terminal that is not Claude Code never reads as a menu from the screen a
   assert.equal(screenShowsMenu('codex> apply patch? (y/n)  Esc to cancel'), false);
   assert.equal(screenShowsMenu('? for shortcuts\n Do you want to proceed?\n 1. Yes  Esc to cancel'), true);
 });
+
+// Dwight, 34956ccb review H1: Esc at a permission prompt or at an AskUserQuestion
+// fires NO hook (live, 2.1.287), and an interrupt fires no Stop. Hook state alone
+// would then hold the agent forever. The screen settles it: after Esc it ends on
+// the input box again, and the terminal goes quiet.
+const { holdState, DISMISS_QUIET_MS } = loadTs('src/main/promptGate.ts');
+
+test('a menu dismissed with Esc reads as dismissed once the terminal is quiet', () => {
+  for (const kind of ['ask', 'auq']) {
+    const tail = fixture(`${kind}-esc`);
+    assert.equal(screenShowsMenu(tail), false, `${kind}: after Esc the screen ends on the input box`);
+    assert.equal(holdState(true, tail, DISMISS_QUIET_MS), 'dismissed', `${kind} quiet`);
+    assert.equal(holdState(true, tail, DISMISS_QUIET_MS - 1), 'held', `${kind}: not yet quiet long enough`);
+  }
+});
+
+test('a menu still on screen stays held however long it waits', () => {
+  for (const kind of ['ask', 'auq', 'plan']) {
+    assert.equal(holdState(true, fixture(`${kind}-menu`), 60 * 60_000), 'held', kind);
+    assert.equal(holdState(false, fixture(`${kind}-menu`), 0), 'held', `${kind}: the screen alone holds`);
+  }
+});
+
+test('with no open hook state, the input box is free and an unknown screen is free', () => {
+  assert.equal(holdState(false, fixture('ask-after'), 0), 'free');
+  assert.equal(holdState(false, '', 0), 'free');
+  // Hook state open but no Claude Code screen to read: keep holding (errs closed).
+  assert.equal(holdState(true, 'codex> working', 60 * 60_000), 'held');
+  assert.equal(holdState(true, undefined, 60 * 60_000), 'held');
+});
+
+test('promptOpenOnPty releases a dismissed menu: the gate forgets it and the policy ask settles', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
+  const fn = src.slice(src.indexOf('function promptOpenOnPty'), src.indexOf('function promptOpenOnPty') + 1600);
+  assert.match(fn, /holdState\(/);
+  assert.match(fn, /'dismissed'[\s\S]*promptGate\.forget\(agentId\)[\s\S]*hookServer\.dismissPolicyAsk\(agentId\)/);
+  assert.match(fn, /ptyManager\.idleFor\(ptyId\)/);
+});
+
+// Review L2: when a menu opens between the text and its Enter, the text stays in
+// the input box. A retry of the same text must send only Enter, not a second copy.
+const { PendingSubmit } = loadTs('src/shared/pendingSubmit.ts');
+
+test('text left in the input box is not typed again on the retry', () => {
+  const p = new PendingSubmit();
+  assert.equal(p.typeText('pty-1', 'hello'), true, 'nothing pending: type it');
+  p.withheld('pty-1', 'hello');
+  assert.equal(p.typeText('pty-1', 'hello'), false, 'the same text is already in the box');
+  assert.equal(p.typeText('pty-2', 'hello'), true, 'another terminal is unaffected');
+  p.submitted('pty-1');
+  assert.equal(p.typeText('pty-1', 'hello'), true, 'after Enter the box is empty again');
+});
+
+test('interchangeable texts (inbox nudges) count as the same leftover', () => {
+  const p = new PendingSubmit();
+  p.withheld('pty-1', 'nudge a');
+  assert.equal(p.typeText('pty-1', 'nudge b'), true, 'a different message is typed');
+  assert.equal(p.typeText('pty-1', 'nudge b', true), false, 'a nudge already in the box serves');
+  p.forget('pty-1');
+  assert.equal(p.typeText('pty-1', 'nudge b', true), true);
+});
+
+test('the watchdog nudge sends only Enter when its text is already in the box', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
+  const fn = src.slice(src.indexOf('function nudgeWorker'), src.indexOf('function runWorkerWakeBeat'));
+  assert.match(fn, /nudgeLeftover\.typeText\(ptyId, text, true\)/);
+  assert.match(fn, /nudgeLeftover\.withheld\(ptyId, text\)/);
+  assert.match(fn, /nudgeLeftover\.submitted\(ptyId\)/);
+  // The user (or anyone) submitting the box clears it; a dead terminal is forgotten.
+  assert.match(src, /UserPromptSubmit'[\s\S]{0,200}nudgeLeftover\.submitted/);
+  assert.match(src, /nudgeLeftover\.forget\(/);
+});
+
+// Review H1, part 3: a hold must never be invisible. The card says so.
+test('an agent held at a menu says so on its card', () => {
+  const read = (...p) => fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'src', ...p), 'utf8');
+  assert.match(read('store', 'store.ts'), /heldAtMenu\?: boolean/);
+  assert.match(read('components', 'AgentStrip.tsx'), /heldAtMenu=\{a\.heldAtMenu\}/);
+  const card = read('components', 'AgentCard.tsx');
+  assert.match(card, /heldAtMenu \? t\('agentCard\.heldAtMenu'\)/);
+  const hive = read('hooks', 'useHive.ts');
+  assert.match(hive, /ptyPromptOpen\(a\.ptyId\)[\s\S]{0,300}heldAtMenu/);
+  for (const lang of ['en', 'ar', 'zh-CN']) {
+    const json = JSON.parse(read('i18n', 'locales', `${lang}.json`));
+    assert.ok(json.agentCard.heldAtMenu && json.agentCard.heldAtMenuTitle, lang);
+  }
+});

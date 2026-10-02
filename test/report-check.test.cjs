@@ -293,9 +293,12 @@ test('off: the settings file is byte-identical to one written before this featur
   const b = fs.readFileSync(path.join(f.home, 'hive', 'agents', 'jim-1', 'settings.json'), 'utf8');
   assert.equal(a, b);
   // And against the list as it stood before this feature, so a change that adds the
-  // hook for everyone cannot pass by changing both sides of the comparison.
+  // hook for everyone cannot pass by changing both sides of the comparison. The
+  // menu signals (PermissionRequest, Elicitation, ElicitationResult) were added for
+  // everyone by the prompt gate fix: they open and close the gate, and decide nothing.
   assert.deepEqual(Object.keys(JSON.parse(a).hooks).sort(),
-    ['Notification', 'PostCompact', 'PostToolUse', 'PreCompact', 'PreToolUse', 'SessionStart', 'Stop', 'SubagentStop', 'UserPromptSubmit']);
+    ['Elicitation', 'ElicitationResult', 'Notification', 'PermissionRequest', 'PostCompact', 'PostToolUse', 'PreCompact', 'PreToolUse', 'SessionStart', 'Stop', 'SubagentStop', 'UserPromptSubmit']);
+  assert.ok(!('PostToolUseFailure' in JSON.parse(a).hooks), 'the failure hook stays opt-in');
 });
 
 test('on (live): the failure hook is registered, outcomes are recorded and god is told', async (t) => {

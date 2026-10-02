@@ -108,6 +108,9 @@ export interface Agent {
    *  positional seed. useHive types it once after boot-grace then clears it.
    *  Ephemeral spawn state — not persisted. (ondev-b) */
   seedPrompt?: string;
+  /** Its terminal is at a menu (permission prompt, question, plan approval), so
+   *  automated messages wait for an answer. Shown on the card; polled from main. */
+  heldAtMenu?: boolean;
 }
 
 export interface FeedEntry {

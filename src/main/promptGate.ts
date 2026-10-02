@@ -19,6 +19,13 @@
  *    PermissionDenied (by tool_use_id, so a PARALLEL tool finishing does not close
  *    another call's prompt); ElicitationResult; and anything that cannot happen
  *    while a menu blocks the turn — UserPromptSubmit, Stop, StopFailure, SessionStart.
+ *  - Esc closes a menu with NO hook at all. `holdState` overrules the hook state
+ *    when the screen shows the input box again and the terminal has gone quiet.
+ *
+ * The hive registers PreToolUse, PostToolUse, PermissionRequest, Elicitation,
+ * ElicitationResult, Notification, UserPromptSubmit, Stop and SessionStart for
+ * every agent; PostToolUseFailure only with the report check. PermissionDenied and
+ * StopFailure are handled when a settings file sends them.
  *
  * `screenShowsMenu` is the backstop for a menu whose hook never arrived: it reads the
  * PTY's output tail and asks whether the last thing drawn was a menu footer or the
@@ -127,16 +134,43 @@ const INPUT_FOOTERS = ['shift+tabtocycle', '?forshortcuts', 'esctointerrupt'];
  * is what the hook state above is for.
  */
 export function screenShowsMenu(tail: string | undefined | null): boolean {
-  if (!tail) return false;
+  const { menu, input } = footers(tail);
+  // No input-box footer at all: not a Claude Code screen (or not yet drawn), and
+  // another CLI's idle screen would never clear the menu again. Leave it to hooks.
+  return input >= 0 && menu > input;
+}
+
+/** Positions of the last menu footer and the last input-box footer in a tail. */
+function footers(tail: string | undefined | null): { menu: number; input: number } {
+  if (!tail) return { menu: -1, input: -1 };
   const text = tail
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
     .replace(/\x1b\[[0-9;?<>=]*[ -/]*[@-~]/g, '')
     .replace(/\x1b[@-_]/g, '')
     .replace(/\s+/g, '');
   const last = (marks: string[]) => Math.max(...marks.map((m) => text.lastIndexOf(m)));
-  const menu = last(MENU_FOOTERS);
-  const input = last(INPUT_FOOTERS);
-  // No input-box footer at all: not a Claude Code screen (or not yet drawn), and
-  // another CLI's idle screen would never clear the menu again. Leave it to hooks.
-  return input >= 0 && menu > input;
+  return { menu: last(MENU_FOOTERS), input: last(INPUT_FOOTERS) };
+}
+
+/** How long the terminal must be silent, on the input box, before hook state that
+ *  still says "menu open" is overruled. Claude Code redraws while it works (the
+ *  spinner), so ten quiet seconds on the input box means the turn has ended. */
+export const DISMISS_QUIET_MS = 10_000;
+
+/**
+ * Hold, release, or overrule. Esc at a permission prompt or at an AskUserQuestion
+ * fires NO hook and no Stop (live, 2.1.287), so hook state alone would hold the
+ * agent forever: no nudge, no queued message, ever. The screen settles it.
+ *
+ *  - hooks say open: 'held', unless the screen ends on the input box and the
+ *    terminal has been quiet for DISMISS_QUIET_MS: then 'dismissed' (the menu went
+ *    away without an answer the hooks could see; the caller forgets it).
+ *  - hooks say nothing: 'held' if the screen ends on a menu, else 'free'.
+ */
+export function holdState(hooksOpen: boolean, tail: string | undefined | null, idleMs: number): 'held' | 'dismissed' | 'free' {
+  if (hooksOpen) {
+    const { menu, input } = footers(tail);
+    return input >= 0 && input > menu && idleMs >= DISMISS_QUIET_MS ? 'dismissed' : 'held';
+  }
+  return screenShowsMenu(tail) ? 'held' : 'free';
 }
