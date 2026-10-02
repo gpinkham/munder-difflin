@@ -14,7 +14,7 @@
  * visible immediately, no repaint required.
  */
 import { useEffect, useState } from 'react';
-import { inputLeftover } from '../hooks/inputLeftover';
+import { inputLeftover, isTerminalReply } from '../hooks/inputLeftover';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
@@ -338,8 +338,8 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     if (entry.exited) return;
     window.cth.writePty(ptyId, data);
     // The user is editing the box: automation's leftover text is no longer known
-    // to be there as typed. (The terminal's own escape-sequence replies are not edits.)
-    if (!(data.length > 1 && data.startsWith('\x1b'))) inputLeftover.forget(ptyId);
+    // to be there as typed. (The terminal's own replies are not edits.)
+    if (!isTerminalReply(data)) inputLeftover.forget(ptyId);
     // A lone Escape or Ctrl-C closes interactive pickers. Arrow-key escape
     // sequences must NOT clear the block while the user navigates a picker.
     if (data === '\x1b' || data === '\x03') {

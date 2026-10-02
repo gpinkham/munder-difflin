@@ -236,3 +236,22 @@ test('the renderer forgets leftover text when the user submits, types, or the te
   assert.match(clear, /inputLeftover\.forget\(ptyId\)/, 'Ctrl-U cleared the box');
   assert.match(read('components', 'PtyTerminalView.tsx'), /inputLeftover\.forget\(ptyId\)/, 'dropped paths');
 });
+
+// Recheck nit (96ee1bb1): only the terminal's own replies are not edits. ESC-led
+// user keys (Option+Backspace, forward Delete, arrows) still clear the record.
+const { isTerminalReply } = loadTs('src/renderer/src/hooks/inputLeftover.ts');
+
+test('terminal replies are recognised; ESC-led editing keys are not replies', () => {
+  for (const reply of ['\x1b[0n', '\x1b[12;40R', '\x1b[?1;2c', '\x1b[>0;276;0c', '\x1b[?997;1n', '\x1b[I', '\x1b[O',
+    '\x1b]11;rgb:1a1a/1b1b/2626\x07', '\x1b]10;rgb:ffff/ffff/ffff\x1b\\', '\x1bP>|xterm(370)\x1b\\']) {
+    assert.equal(isTerminalReply(reply), true, JSON.stringify(reply));
+  }
+  for (const key of ['\x1b\x7f', '\x1b[3~', '\x1b[D', '\x1b[A', '\x1b', 'a', '\r', '\x1bb', '\x1b[200~text\x1b[201~']) {
+    assert.equal(isTerminalReply(key), false, JSON.stringify(key));
+  }
+});
+
+test('the keystroke path clears the record for anything but a terminal reply', () => {
+  const pool = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'src', 'components', 'terminalPool.ts'), 'utf8');
+  assert.match(pool, /if \(!isTerminalReply\(data\)\) inputLeftover\.forget\(ptyId\)/);
+});
