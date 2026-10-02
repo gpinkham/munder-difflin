@@ -22,7 +22,7 @@ import { inboxNudgeText } from '../../../shared/hiveNudge';
 import { resolveGodName } from '../../../shared/godIdentity';
 import { acquireTerminal, resetTerminal, isTerminalAutomationSafe } from '@/components/terminalPool';
 import { canDeliverToAgent, deliverWithAcknowledgement, checkPrecondition, retryWhileHeld } from './queueDelivery';
-import { PendingSubmit } from '../../../shared/pendingSubmit';
+import { inputLeftover } from './inputLeftover';
 import { OFFICE_CAST, DEFAULT_CHARACTER } from '@/scene/office/cast';
 
 const GOD_ID = 'god';
@@ -87,8 +87,6 @@ const INITIAL_GOD_PROMPT = [
 // can NEVER interleave their text + Enter — which jammed them onto one line and
 // produced "Unknown command: /remote-control<next prompt>".
 const writeChains = new Map<string, Promise<void>>();
-/** Text left in an input box because main withheld its Enter at a menu. */
-const leftover = new PendingSubmit();
 const readyPids = new Map<string, number>();
 
 async function waitForTerminalReady(
@@ -152,21 +150,21 @@ function submitToPty(
     // the Enter below would answer a permission prompt or a question for the user.
     // A retry of text whose Enter was withheld finds it still in the input box:
     // send only the Enter, not a second copy.
-    if (leftover.typeText(ptyId, payload)) {
+    if (inputLeftover.typeText(ptyId, payload)) {
       const wrote = await window.cth.writePtyAutomated(ptyId, payload);
       if (!wrote?.ok) {
-        if (wrote?.error !== 'prompt-open') leftover.forget(ptyId);
+        if (wrote?.error !== 'prompt-open') inputLeftover.forget(ptyId);
         throw new Error(wrote?.error ?? `pty write failed: ${ptyId}`);
       }
     }
     await new Promise((r) => setTimeout(r, 140));
     const submitted = await window.cth.writePtyAutomated(ptyId, '\r');
     if (!submitted?.ok) {
-      if (submitted?.error === 'prompt-open') leftover.withheld(ptyId, payload);
-      else leftover.forget(ptyId);
+      if (submitted?.error === 'prompt-open') inputLeftover.withheld(ptyId, payload);
+      else inputLeftover.forget(ptyId);
       throw new Error(submitted?.error ?? `pty write failed: ${ptyId}`);
     }
-    leftover.submitted(ptyId);
+    inputLeftover.submitted(ptyId);
     await new Promise((r) => setTimeout(r, settleMs));
   });
   writeChains.set(ptyId, next);
@@ -500,6 +498,8 @@ export function useHive(config: HarnessConfig | null): void {
       const { updateAgent, agents } = useStore.getState();
       const self = agents.find((a) => a.id === e.agentId);
       if (!self) return;
+      // The box was submitted (by anyone): text automation left in it is gone.
+      if (e.event === 'UserPromptSubmit' && self.ptyId) inputLeftover.submitted(self.ptyId);
       // Breaker precedence (#5C): a constrained/stopped agent stays 'looping'
       // regardless of in-flight tool/prompt/compact events.
       const blevel = breakerLevel.current[e.agentId];

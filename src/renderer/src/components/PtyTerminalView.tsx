@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { inputLeftover } from '../hooks/inputLeftover';
 import type { CSSProperties } from 'react';
 import '@xterm/xterm/css/xterm.css';
 import { Icon } from './Icon';
@@ -332,6 +333,7 @@ export function PtyTerminalView({ ptyId, onStreamData, onUserPrompt, onToggleFul
     if (paths.length === 0) return;
     // Trailing space separates consecutive drops and lets the user keep typing.
     void window.cth.writePty(ptyId, paths.join(' ') + ' ');
+    inputLeftover.forget(ptyId);
   };
 
   const zoom = (delta: number) => setTerminalFontSize(getTerminalFontSize() + delta);

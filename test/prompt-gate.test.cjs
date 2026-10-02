@@ -216,3 +216,23 @@ test('an agent held at a menu says so on its card', () => {
     assert.ok(json.agentCard.heldAtMenu && json.agentCard.heldAtMenuTitle, lang);
   }
 });
+
+// Recheck LOW (c442a8a5): the renderer's leftover record must not outlive the text.
+// If the user submits or edits the box, or the terminal exits, a retry that sent
+// only Enter would submit an empty box and acknowledge a message never delivered.
+test('the renderer forgets leftover text when the user submits, types, or the terminal exits', () => {
+  const read = (...p) => fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'src', ...p), 'utf8');
+  assert.match(read('hooks', 'inputLeftover.ts'), /export const inputLeftover = new PendingSubmit\(\)/);
+  const hive = read('hooks', 'useHive.ts');
+  assert.match(hive, /import \{ inputLeftover \} from '\.\/inputLeftover'/);
+  assert.doesNotMatch(hive, /new PendingSubmit\(\)/, 'one shared record, not a private one');
+  assert.match(hive, /e\.event === 'UserPromptSubmit' && self\.ptyId\) inputLeftover\.submitted\(self\.ptyId\)/);
+  const pool = read('components', 'terminalPool.ts');
+  const onData = pool.slice(pool.indexOf('term.onData((data) => {'), pool.indexOf('term.onData((data) => {') + 400);
+  assert.match(onData, /inputLeftover\.forget\(ptyId\)/, 'a user keystroke');
+  const onExit = pool.slice(pool.indexOf('window.cth.onPtyExit(ptyId'), pool.indexOf('window.cth.onPtyExit(ptyId') + 300);
+  assert.match(onExit, /inputLeftover\.forget\(ptyId\)/, 'the terminal exited');
+  const clear = pool.slice(pool.indexOf('export function clearTerminalDraft'), pool.indexOf('export function dismissTerminalPicker'));
+  assert.match(clear, /inputLeftover\.forget\(ptyId\)/, 'Ctrl-U cleared the box');
+  assert.match(read('components', 'PtyTerminalView.tsx'), /inputLeftover\.forget\(ptyId\)/, 'dropped paths');
+});
