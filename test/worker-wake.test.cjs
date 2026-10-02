@@ -98,10 +98,30 @@ test('a recent permission/HITL notification blocks nudges', () => {
   const now = 200_000;
   w.noteHook('alice', 'Notification', 'Claude needs your permission to use Bash.', now - 1_000);
   assert.deepEqual(w.decide([fact()], now), []);
-  // after the rearm window the block expires
-  const later = now + WORKER_WAKE_HITL_REARM_MS + 1;
-  assert.deepEqual(w.decide([fact({ lastOutputAt: later - WORKER_WAKE_IDLE_MS - 1 })], later), ['alice']);
 });
+
+// The nudge ends in Enter, and Enter at "Do you want to proceed? ❯ 1. Yes" approves the
+// tool call. A time limit on the hold therefore turned every unanswered permission
+// prompt into a yes about five minutes later, for any worker with mail waiting. While
+// the menu is open (promptGate.ts) the worker is held, however long that takes.
+test('a worker still at a menu past the rearm window is not nudged', () => {
+  const w = new WorkerWakeWatchdog();
+  w.noteSpawn('pty-alice', 0);
+  const now = 200_000;
+  w.noteHook('alice', 'Notification', 'Claude needs your permission to use Bash.', now - 1_000);
+  const later = now + WORKER_WAKE_HITL_REARM_MS * 12;
+  const quiet = { lastOutputAt: later - WORKER_WAKE_IDLE_MS - 1 };
+  assert.deepEqual(w.decide([fact({ ...quiet, awaitingAnswer: true })], later), [], 'an hour at the menu is still a menu');
+  assert.deepEqual(w.decide([fact({ ...quiet, awaitingAnswer: false })], later + 1), ['alice'], 'answered: nudged');
+});
+
+test('a policy ask still waiting for an answer blocks nudges with no notification at all', () => {
+  const w = new WorkerWakeWatchdog();
+  w.noteSpawn('pty-alice', 0);
+  assert.deepEqual(w.decide([fact({ awaitingAnswer: true })], 200_000), []);
+  assert.deepEqual(w.decide([fact({ awaitingAnswer: false })], 200_000), ['alice']);
+});
+
 
 test('an idle-waiting notification does NOT count as a HITL hold', () => {
   const w = new WorkerWakeWatchdog();
