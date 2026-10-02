@@ -14,6 +14,7 @@
  * visible immediately, no repaint required.
  */
 import { useEffect, useState } from 'react';
+import { inputLeftover } from '../hooks/inputLeftover';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
@@ -203,6 +204,7 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
   // stale event is suppressed in the main process and never reaches here.
   entry.unsub.push(window.cth.onPtyExit(ptyId, ({ exitCode, signal }) => {
     entry.exited = true;
+    inputLeftover.forget(ptyId);
     term.writeln(`\r\n\x1b[2m─ process exited (code ${exitCode}${signal ? `, signal ${signal}` : ''}) ─\x1b[0m`);
   }));
   // A first-time engine-CLI install just finished and the agent is auto
@@ -335,6 +337,9 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
   term.onData((data) => {
     if (entry.exited) return;
     window.cth.writePty(ptyId, data);
+    // The user is editing the box: automation's leftover text is no longer known
+    // to be there as typed. (The terminal's own escape-sequence replies are not edits.)
+    if (!(data.length > 1 && data.startsWith('\x1b'))) inputLeftover.forget(ptyId);
     // A lone Escape or Ctrl-C closes interactive pickers. Arrow-key escape
     // sequences must NOT clear the block while the user navigates a picker.
     if (data === '\x1b' || data === '\x03') {
@@ -526,6 +531,7 @@ export function clearTerminalDraft(ptyId: string): string {
   // loss every time an abandoned-looking draft turned out to be a real one.
   const discarded = entry.lineBuf;
   void window.cth.writePty(ptyId, '\x15');
+  inputLeftover.forget(ptyId);
   entry.inputDirty = false;
   entry.inputDirtyAt = 0;
   // Reset our model of the line too. Leaving it set made the very next keystroke
