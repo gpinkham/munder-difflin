@@ -105,3 +105,60 @@ test('messages without a precondition never consult the inbox', async () => {
   assert.equal(verdict, 'send');
   assert.equal(consulted, false);
 });
+
+// 34956ccb review L1: main refusing a write because the terminal is at a menu is a
+// HOLD, not a failure. The reason is carried out of the attempt, so a menu that
+// closes before a re-check cannot turn three holds into a dropped message.
+test('a write refused at a menu comes back as held, not as a failure', async () => {
+  let acknowledged = false;
+  const out = await deliverWithAcknowledgement(
+    () => Promise.reject(new Error('prompt-open')),
+    () => { acknowledged = true; }
+  );
+  assert.equal(out, 'held');
+  assert.equal(acknowledged, false);
+});
+
+test('the drain counts a hold as a hold, using the carried reason, not a re-check', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'src', 'hooks', 'useHive.ts'), 'utf8');
+  const drain = src.slice(src.indexOf('const sent = await deliverWithAcknowledgement('), src.indexOf('const attempts = (sendFailures'));
+  assert.match(drain, /sent === 'held'/);
+  assert.doesNotMatch(drain, /ptyPromptOpen/, 'no re-query after the attempt');
+});
+
+// Review L3: a refused god boot prompt was swallowed by the catch. It now waits for
+// the menu to close and tries again; any other failure still ends the attempt.
+const { retryWhileHeld } = loadTs('src/renderer/src/hooks/queueDelivery.ts');
+
+test('retryWhileHeld retries a held write and stops on success', async () => {
+  let calls = 0;
+  const waits = [];
+  await retryWhileHeld(async () => { calls += 1; if (calls < 3) throw new Error('prompt-open'); },
+    { waitMs: 50, maxTries: 5, sleep: async (ms) => { waits.push(ms); } });
+  assert.equal(calls, 3);
+  assert.deepEqual(waits, [50, 50]);
+});
+
+test('retryWhileHeld gives up after maxTries and passes other errors straight through', async () => {
+  let calls = 0;
+  await assert.rejects(retryWhileHeld(async () => { calls += 1; throw new Error('prompt-open'); },
+    { waitMs: 1, maxTries: 3, sleep: async () => {} }), /prompt-open/);
+  assert.equal(calls, 3);
+  calls = 0;
+  await assert.rejects(retryWhileHeld(async () => { calls += 1; throw new Error('no pty: x'); },
+    { waitMs: 1, maxTries: 3, sleep: async () => {} }), /no pty/);
+  assert.equal(calls, 1);
+});
+
+test('the god boot prompts retry while held', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'src', 'hooks', 'useHive.ts'), 'utf8');
+  for (const call of ['submitToPty(GOD_PTY, remoteCommand', 'submitToPty(GOD_PTY, res.seedPrompt', 'submitToPty(GOD_PTY, INITIAL_GOD_PROMPT']) {
+    const at = src.indexOf(call);
+    assert.ok(at > 0, call);
+    assert.match(src.slice(Math.max(0, at - 80), at), /retryWhileHeld\(\(\) =>\s*$/, `${call} is wrapped`);
+  }
+});

@@ -1257,6 +1257,13 @@ export class HiveManager {
         ...(this.captureToolFailuresSafe() ? { PostToolUseFailure: [entry('*')] } : {}),
         UserPromptSubmit: [entry()],
         Notification: [entry()],
+        // Menu signals for the prompt gate (promptGate.ts): PermissionRequest fires
+        // ~100 ms after a permission prompt shows (the Notification comes ~6 s
+        // later), and the Elicitation pair brackets an MCP form. The server answers
+        // all three with no decision, so the user still decides.
+        PermissionRequest: [entry('*')],
+        Elicitation: [entry()],
+        ElicitationResult: [entry()],
         SessionStart: [entry()],
         // #5C: surface mid-`/compact` so an agent boxing up its context reads as
         // 'compacting' on the floor instead of looking frozen.

@@ -58,3 +58,30 @@ test('an allowed call leaves nothing awaiting, and another agent is never held',
   assert.equal(server.awaitingPolicyAnswer('god-1'), false);
   assert.equal(server.awaitingPolicyAnswer(undefined), false);
 });
+
+// 34956ccb review H1: Esc at the permission prompt fires no hook, so nothing would
+// ever settle the ask. Main settles it when the screen shows the menu is gone.
+test('a dismissed policy ask is settled: not awaiting, and its card closes', async (t) => {
+  const { server, fire } = await floor(t);
+  await fire({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'git push -q' } });
+  assert.equal(server.awaitingPolicyAnswer('jim-1'), true);
+  server.dismissPolicyAsk('jim-1');
+  assert.equal(server.awaitingPolicyAnswer('jim-1'), false);
+  server.dismissPolicyAsk('jim-1'); // idempotent
+  server.dismissPolicyAsk(undefined);
+});
+
+// Review M1: PermissionRequest is registered so the gate opens ~100 ms after the
+// prompt shows, not ~6 s later. A PermissionRequest hook CAN allow or deny, so the
+// server must answer it with no decision at all.
+test('PermissionRequest and the Elicitation pair pass through with no decision', async (t) => {
+  const { server, fire } = await floor(t);
+  const seen = [];
+  server.onEvent = (_id, event) => seen.push(event);
+  for (const e of ['PermissionRequest', 'Elicitation', 'ElicitationResult']) {
+    const out = await fire({ hook_event_name: e, tool_name: 'Bash', tool_input: { command: 'git push' } });
+    assert.equal(out?.hookSpecificOutput, undefined, `${e}: no decision`);
+    assert.equal(out?.decision, undefined, e);
+  }
+  assert.deepEqual(seen.filter((e) => e !== 'Unknown').slice(-3), ['PermissionRequest', 'Elicitation', 'ElicitationResult']);
+});

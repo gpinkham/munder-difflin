@@ -66,7 +66,8 @@ import { RulesManager, RULE_CAPS } from './rules';
 import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog, type WorkerWakeFacts } from './workerWake';
-import { PromptGate, screenShowsMenu } from './promptGate';
+import { PromptGate, holdState } from './promptGate';
+import { PendingSubmit } from '../shared/pendingSubmit';
 import { inboxNudgeText } from '../shared/hiveNudge';
 import { resolveGodName } from '../shared/godIdentity';
 import { fetchHireManifest, readHireManifestFiles } from './hire';
@@ -320,6 +321,8 @@ const workerWake = new WorkerWakeWatchdog();
 // plan approval, MCP form). Every automated write that ends in Enter checks it,
 // because Enter at a menu chooses an answer nobody gave. See promptGate.ts.
 const promptGate = new PromptGate();
+/** Watchdog nudge text left in an input box because its Enter was withheld. */
+const nudgeLeftover = new PendingSubmit();
 // HookServer needs BOTH: Oscar's control registry (HITL pause/gate/steer/halt via
 // hook returns) AND Jim's breaker (feed recordToolUse on each PostToolUse).
 /** How often the rules reconcile pass runs. Long on purpose: it is a backstop,
@@ -343,6 +346,11 @@ const hookServer = new HookServer(
   (agentId, event, message, payload) => {
     workerWake.noteHook(agentId, event, message);
     promptGate.noteHook(agentId, payload);
+    // A submitted prompt (typed by anyone) empties the input box.
+    if (event === 'UserPromptSubmit' && agentId) {
+      const pty = ptyForAgent(agentId);
+      if (pty) nudgeLeftover.submitted(pty);
+    }
   },
   (agentId) => rules.takeNotice(agentId),
   (agentId) => rules.fullSet(agentId)
@@ -494,6 +502,7 @@ function teardownPty(id: string): void {
     // Drop watchdog state so a dead agent can't get nudged or leak its grace.
     try { workerWake.forget(agentId, id); } catch { /* best-effort */ }
     try { promptGate.forget(agentId); } catch { /* best-effort */ }
+    try { nudgeLeftover.forget(id); } catch { /* best-effort */ }
     // Drop breaker state so a dead agent can't leak/zombie a tripped level.
     try { breaker.forget(agentId); } catch { /* best-effort */ }
     // A replacement using this id needs a new usage counter, not the dead PTY's.
@@ -1146,12 +1155,24 @@ function ptyForAgent(agentId: string): string | undefined {
 
 /** True when this PTY may be showing an interactive menu, so automation must not
  *  type into it: a hook said a menu opened and nothing has answered it, a policy
- *  ask is still pending, or the screen itself ends on a menu footer. Errs closed. */
+ *  ask is still pending, or the screen itself ends on a menu footer. Errs closed.
+ *
+ *  Esc closes a menu with no hook, so hook state can outlive the menu. When the
+ *  screen is back on the input box and the terminal has been quiet for
+ *  DISMISS_QUIET_MS, the menu was dismissed: forget it and settle any policy ask,
+ *  or the agent would never be nudged or sent a queued message again. */
 function promptOpenOnPty(ptyId: string): boolean {
   try {
     const agentId = ptyToAgent.get(ptyId);
-    if (agentId && (promptGate.isOpen(agentId) || hookServer.awaitingPolicyAnswer(agentId))) return true;
-    return screenShowsMenu(ptyManager.outputTail(ptyId));
+    const hooksOpen = !!agentId && (promptGate.isOpen(agentId) || hookServer.awaitingPolicyAnswer(agentId));
+    const state = holdState(hooksOpen, ptyManager.outputTail(ptyId), ptyManager.idleFor(ptyId) ?? 0);
+    if (state === 'dismissed' && agentId) {
+      promptGate.forget(agentId);
+      hookServer.dismissPolicyAsk(agentId);
+      console.log(`[prompt-gate] ${agentId}: menu dismissed (input box, quiet terminal), hold released`);
+      return false;
+    }
+    return state !== 'free';
   } catch {
     return true;
   }
@@ -5248,18 +5269,25 @@ function nudgeWorker(ptyId: string, ids: string[] = []): void {
   // produce byte-identical nudges: the queue's one-pending rule recognises either
   // via isInboxNudge, and a watchdog nudge names its ids so the agent can still
   // tell "I filed this last turn" from "woken for nothing".
-  const wrote = ptyManager.write(ptyId, inboxNudgeText(ids));
-  if (!wrote.ok) { console.warn(`[worker-wake] write failed for ${ptyId}: ${wrote.error}`); return; }
+  const text = inboxNudgeText(ids);
+  // A nudge whose Enter was withheld is still in the input box; any nudge says
+  // the same thing, so send only the Enter rather than a second copy.
+  if (nudgeLeftover.typeText(ptyId, text, true)) {
+    const wrote = ptyManager.write(ptyId, text);
+    if (!wrote.ok) { console.warn(`[worker-wake] write failed for ${ptyId}: ${wrote.error}`); return; }
+  }
   setTimeout(() => {
     try {
       if (promptOpenOnPty(ptyId)) {
         // A menu opened in the 140 ms since the text went in. Enter would answer it;
         // leave the text in the input box instead.
+        nudgeLeftover.withheld(ptyId, text);
         console.warn(`[worker-wake] ${ptyId} opened a menu before submit, Enter withheld`);
         return;
       }
       const submitted = ptyManager.write(ptyId, '\r');
       if (!submitted.ok) console.warn(`[worker-wake] submit failed for ${ptyId}: ${submitted.error}`);
+      else nudgeLeftover.submitted(ptyId);
     } catch (e) { console.error('[worker-wake] submit threw:', e); }
   }, 140);
 }

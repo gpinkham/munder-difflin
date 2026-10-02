@@ -21,6 +21,8 @@ export interface AgentCardProps {
   ptyId?: string;
   project: string;
   action?: string;
+  /** The terminal is held at a menu: automated messages wait for an answer. */
+  heldAtMenu?: boolean;
   /** Context gauge: 0..8 segments filled (session context ÷ context limit). */
   progress?: number;
   /** Live context size (tokens) — shown in the gauge tooltip. */
@@ -55,7 +57,7 @@ const fmtK = (n: number): string => `${Math.round(n / 1000)}k`;
  * and a slim gauge pinned to the bottom edge. Nothing overlaps anything.
  */
 export function AgentCard({
-  name, character, accent, status, ptyId, project, action, progress = 0,
+  name, character, accent, status, ptyId, project, action, heldAtMenu, progress = 0,
   contextTokens, contextLimit, selected, isGod, onClick, onRename,
   doingCount = 0, onTaskNoteClick, draggable, note, onEditNote
 }: AgentCardProps) {
@@ -125,7 +127,8 @@ export function AgentCard({
     .filter(Boolean).join(', ') || 'none';
 
   // One context line: what it's DOING while working, WHERE it lives while idle.
-  const infoLine = (status !== 'idle' && action) ? action : project;
+  // A hold at a menu outranks both: it is why nothing is reaching the agent.
+  const infoLine = heldAtMenu ? t('agentCard.heldAtMenu') : (status !== 'idle' && action) ? action : project;
   const noteFirstLine = (note ?? '').split('\n').find((l) => l.trim()) ?? '';
 
   return (
@@ -232,7 +235,7 @@ export function AgentCard({
 
             {/* Context line: action while working, repo while idle. */}
             <div
-              title={`${project}${action && status !== 'idle' ? ` — ${action}` : ''}`}
+              title={heldAtMenu ? t('agentCard.heldAtMenuTitle') : `${project}${action && status !== 'idle' ? ` — ${action}` : ''}`}
               style={{
                 fontSize: 11, lineHeight: '14px',
                 color: 'var(--cth-ink-500)',

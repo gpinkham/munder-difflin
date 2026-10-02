@@ -140,6 +140,7 @@ export function AgentStrip({ config }: AgentStripProps) {
             ptyId={a.ptyId}
             project={a.project}
             action={a.action}
+            heldAtMenu={a.heldAtMenu}
             progress={a.progress}
             contextTokens={a.contextTokens}
             contextLimit={a.contextLimit}

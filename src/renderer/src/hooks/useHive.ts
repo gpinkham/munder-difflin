@@ -21,7 +21,8 @@ import { isDurableRole, preferredAgentRole, roleForHiveSpawn } from '../../../sh
 import { inboxNudgeText } from '../../../shared/hiveNudge';
 import { resolveGodName } from '../../../shared/godIdentity';
 import { acquireTerminal, resetTerminal, isTerminalAutomationSafe } from '@/components/terminalPool';
-import { canDeliverToAgent, deliverWithAcknowledgement, checkPrecondition } from './queueDelivery';
+import { canDeliverToAgent, deliverWithAcknowledgement, checkPrecondition, retryWhileHeld } from './queueDelivery';
+import { PendingSubmit } from '../../../shared/pendingSubmit';
 import { OFFICE_CAST, DEFAULT_CHARACTER } from '@/scene/office/cast';
 
 const GOD_ID = 'god';
@@ -86,6 +87,8 @@ const INITIAL_GOD_PROMPT = [
 // can NEVER interleave their text + Enter — which jammed them onto one line and
 // produced "Unknown command: /remote-control<next prompt>".
 const writeChains = new Map<string, Promise<void>>();
+/** Text left in an input box because main withheld its Enter at a menu. */
+const leftover = new PendingSubmit();
 const readyPids = new Map<string, number>();
 
 async function waitForTerminalReady(
@@ -147,11 +150,23 @@ function submitToPty(
     // immune (the prev.catch above absorbs it for the next writer).
     // The automated write: main refuses it while the terminal is at a menu, where
     // the Enter below would answer a permission prompt or a question for the user.
-    const wrote = await window.cth.writePtyAutomated(ptyId, payload);
-    if (!wrote?.ok) throw new Error(wrote?.error ?? `pty write failed: ${ptyId}`);
+    // A retry of text whose Enter was withheld finds it still in the input box:
+    // send only the Enter, not a second copy.
+    if (leftover.typeText(ptyId, payload)) {
+      const wrote = await window.cth.writePtyAutomated(ptyId, payload);
+      if (!wrote?.ok) {
+        if (wrote?.error !== 'prompt-open') leftover.forget(ptyId);
+        throw new Error(wrote?.error ?? `pty write failed: ${ptyId}`);
+      }
+    }
     await new Promise((r) => setTimeout(r, 140));
     const submitted = await window.cth.writePtyAutomated(ptyId, '\r');
-    if (!submitted?.ok) throw new Error(submitted?.error ?? `pty write failed: ${ptyId}`);
+    if (!submitted?.ok) {
+      if (submitted?.error === 'prompt-open') leftover.withheld(ptyId, payload);
+      else leftover.forget(ptyId);
+      throw new Error(submitted?.error ?? `pty write failed: ${ptyId}`);
+    }
+    leftover.submitted(ptyId);
     await new Promise((r) => setTimeout(r, settleMs));
   });
   writeChains.set(ptyId, next);
@@ -460,14 +475,16 @@ export function useHive(config: HarnessConfig | null): void {
           if (remoteCommand) {
             // settleMs pauses the chain ~1.5s after /remote-control before the
             // orientation prompt (fresh spawns only) is submitted next.
-            await submitToPty(GOD_PTY, remoteCommand, godProvider, REMOTE_CONTROL_SETTLE_MS);
+            // A refused boot prompt waits for the menu to close and tries again;
+            // nothing else would re-send it.
+            await retryWhileHeld(() => submitToPty(GOD_PTY, remoteCommand, godProvider, REMOTE_CONTROL_SETTLE_MS));
           }
           if (!cancelled && !resumedGod) {
             // A type-into-tui god (Crush) can't ride its hive protocol on argv, so the
             // main process hands it back as seedPrompt — type it FIRST (identity), then
             // the orientation kick. Serialized via writeChains so they can't jam. (ondev-b)
-            if (res.seedPrompt) await submitToPty(GOD_PTY, res.seedPrompt, godProvider);
-            await submitToPty(GOD_PTY, INITIAL_GOD_PROMPT, godProvider);
+            if (res.seedPrompt) await retryWhileHeld(() => submitToPty(GOD_PTY, res.seedPrompt!, godProvider));
+            await retryWhileHeld(() => submitToPty(GOD_PTY, INITIAL_GOD_PROMPT, godProvider));
           }
         } catch { /* PTY may have died during startup */ }
         finally { bootGraceUntil.current[GOD_ID] = 0; }
@@ -785,6 +802,21 @@ export function useHive(config: HarnessConfig | null): void {
     return () => clearInterval(iv);
   }, [config?.onboardingComplete]);
 
+  // An agent whose terminal is held at a menu says so on its card, so a hold is
+  // never invisible. Asking main also lets it release a menu dismissed with Esc.
+  useEffect(() => {
+    const iv = setInterval(() => {
+      for (const a of useStore.getState().agents) {
+        if (!a.ptyId) continue;
+        void window.cth.ptyPromptOpen(a.ptyId).then((held) => {
+          const live = useStore.getState().agents.find((x) => x.id === a.id);
+          if (live && !!live.heldAtMenu !== held) useStore.getState().updateAgent(a.id, { heldAtMenu: held });
+        }).catch(() => { /* the pty went away */ });
+      }
+    }, 3_000);
+    return () => clearInterval(iv);
+  }, []);
+
   // 4) Drain each agent's queued messages to its terminal, one at a time, the
   //    moment the agent goes idle. This is what lets the user keep sending
   //    messages while the agent's "cloud terminal" is mid-run: the messages
@@ -878,13 +910,14 @@ export function useHive(config: HarnessConfig | null): void {
             }
           }
         );
-        if (sent) {
+        if (sent === true) {
           delete sendFailures[next.id];
           return { sent: true, message: next };
         }
         // A menu opened between the check above and the write: main refused it.
-        // That is a hold, not a failure, so it never counts toward dropping.
-        if (await window.cth.ptyPromptOpen(target.ptyId)) return { sent: false };
+        // That is a hold, not a failure, so it never counts toward dropping. The
+        // reason comes out of the attempt itself: the menu may be gone by now.
+        if (sent === 'held') return { sent: false };
         // Failed write (dead/crashed pty the store still thinks is idle): retry
         // on the next cooldown-spaced flush, but only MAX_SEND_ATTEMPTS times —
         // then drop LOUDLY so the loss is diagnosable. (#113/#36)

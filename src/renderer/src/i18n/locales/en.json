@@ -82,6 +82,8 @@
     "steerAria": "Send this agent a note"
   },
   "agentCard": {
+    "heldAtMenu": "held at a menu",
+    "heldAtMenuTitle": "Waiting at a menu in its terminal. Messages are delivered after it is answered.",
     "boss": "BOSS",
     "contextTitle": "Context: {{used}} / {{limit}} tokens ({{pct}}%)",
     "contextGaugeTitle": "Context gauge — fills once the agent reports activity",
