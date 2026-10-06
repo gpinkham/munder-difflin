@@ -43,6 +43,8 @@ const MAX_HOOK_FRAME_BYTES = 256 * 1024;
 export interface HookPayload {
   hook_event_name?: string;
   agent_id?: string | null;
+  /** The CLI's own subagent id, when the hook fired inside a subagent (agent_id is the hive agent). */
+  subagent_id?: string;
   session_id?: string;
   transcript_path?: string;
   /** Status-line payloads only: the session's live context accounting. */

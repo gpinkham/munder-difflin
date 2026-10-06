@@ -122,3 +122,41 @@ test('the app wires one HookAuth into both the hook server and the agents it sta
   assert.match(main, /hookServer\.setHookAuth\(hookAuth\);/);
   assert.match(main, /hive\.setHookTokens\(\(id\) => hookAuth\.token\(id\)\);/);
 });
+
+// Dwight M4: inside a subagent, Claude Code sends the SUBAGENT's id as agent_id. The
+// shim used to keep it, so the parent's token failed and every subagent call was
+// treated as forged (no events, no approvals). The shim now sends AGENT_ID and moves
+// the CLI's id to subagent_id. Driven through the real shim and the real socket.
+/** Can this process listen on a local socket? (A sandbox may forbid it.) */
+function canListen(dir) {
+  return new Promise((resolve) => {
+    const srv = require('node:net').createServer();
+    srv.once('error', () => resolve(false));
+    srv.listen(path.join(dir, 'probe.sock'), () => srv.close(() => resolve(true)));
+  });
+}
+
+test('a subagent\'s hook call reaches the server as its agent, authenticated, and its push raises the card', async (t) => {
+  const f = await floor(t);
+  if (!(await canListen(path.join(f.home, 'hive')))) { t.skip('this environment forbids local sockets'); return; }
+  f.server.start();
+  t.after(() => f.server.stop());
+  const shim = path.join(f.home, 'hive', 'bin', 'cth-hook.cjs');
+  const seen = [];
+  f.server.onEvent = (agentId, event, _m, p) => seen.push([agentId, event, p?.subagent_id]);
+  const run = (payload) => new Promise((resolve) => {
+    const child = require('node:child_process').spawn(process.execPath, [shim], {
+      env: { ...process.env, AGENT_ID: 'jim-1', HIVE_SOCK: f.hive.sockPath(), HIVE_HOOK_TOKEN: f.auth.token('jim-1') },
+    });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.on('close', () => resolve(out));
+    child.stdin.end(JSON.stringify(payload));
+  });
+  const repo = path.join(f.home, 'repo');
+  const out = await run({ hook_event_name: 'PreToolUse', agent_id: 'a1b2c3-explore', session_id: 's', tool_name: 'Bash', tool_input: { command: PUSH }, cwd: repo });
+  assert.equal(JSON.parse(out).hookSpecificOutput.permissionDecision, 'deny', 'refused for approval, not a terminal prompt');
+  assert.equal(f.server.pendingGrants().length, 1, 'the card was raised');
+  assert.deepEqual(seen.find(([, e]) => e === 'PreToolUse'), ['jim-1', 'PreToolUse', 'a1b2c3-explore']);
+  assert.doesNotMatch(f.log(), /"kind":"hook-unauthenticated"/);
+});

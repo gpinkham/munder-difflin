@@ -3079,7 +3079,13 @@ process.stdin.on('data', (d) => { data += d; });
 process.stdin.on('end', () => {
   let payload = {};
   try { payload = JSON.parse(data || '{}'); } catch (_) {}
-  if (!payload.agent_id) payload.agent_id = process.env.AGENT_ID || null;
+  // The hive agent is AGENT_ID. Inside a subagent Claude Code sends the SUBAGENT's id
+  // as agent_id: keep it as subagent_id, so the hook's token (the hive agent's) and
+  // the policy's per-agent rules apply to the agent that launched it (Dwight M4).
+  if (process.env.AGENT_ID) {
+    if (payload.agent_id && payload.agent_id !== process.env.AGENT_ID) payload.subagent_id = payload.agent_id;
+    payload.agent_id = process.env.AGENT_ID;
+  } else if (!payload.agent_id) payload.agent_id = null;
   const sock = process.env.HIVE_SOCK;
   if (isStatus) {
     // Status-line mode: Claude Code pipes the session status JSON (incl.
@@ -3234,7 +3240,7 @@ var AUTO = process.env.HIVE_AUTO_APPROVE === '1';
 function post(payload) {
   try {
     if (!SOCK) return;
-    payload.agent_id = payload.agent_id || AGENT;
+    if (AGENT) { if (payload.agent_id && payload.agent_id !== AGENT) payload.subagent_id = payload.agent_id; payload.agent_id = AGENT; }
     var c = net.createConnection(SOCK, function () { try { c.end(JSON.stringify(Object.assign(payload, { hook_token: process.env.HIVE_HOOK_TOKEN || null })) + '\\n'); } catch (e) {} });
     c.on('error', function () {});
   } catch (e) {}
@@ -3271,7 +3277,7 @@ const AGENT = process.env.AGENT_ID || null;
 function post(payload) {
   try {
     if (!SOCK) return;
-    payload.agent_id = payload.agent_id || AGENT;
+    if (AGENT) { if (payload.agent_id && payload.agent_id !== AGENT) payload.subagent_id = payload.agent_id; payload.agent_id = AGENT; }
     const c = createConnection(SOCK, () => { try { c.end(JSON.stringify(Object.assign(payload, { hook_token: process.env.HIVE_HOOK_TOKEN || null })) + '\\n'); } catch (e) {} });
     c.on('error', () => {});
   } catch (e) {}
