@@ -73,25 +73,30 @@ const input: CSSProperties = { width: '100%', padding: '6px 8px', fontFamily: 'i
 function EnforcedRules() {
   const [rules, setRules] = useState<Awaited<ReturnType<typeof window.cth.policyRules>> | null>(null);
   useEffect(() => {
-    window.cth.policyRules().then(setRules, () => setRules([]));
+    window.cth.policyRules().then(setRules, (e) =>
+      setRules({ configured: false, file: null, error: e instanceof Error ? e.message : String(e), rules: [] }));
   }, []);
   if (!rules) return null;
+  const list = rules.rules;
   const what = (r: { decision: string; mode: string; grantable: string[] }): string =>
     r.mode === 'dry_run' ? 'logs only (dry run)'
       : r.decision === 'deny' ? 'blocks'
-      : r.grantable.length ? 'needs your approval (Approvals card)' : 'asks in the terminal';
+      : r.grantable.length ? 'asks; a push in the approvable form goes to the Approvals card' : 'asks in the terminal';
   return (
     <div style={{ ...box, fontSize: 12, lineHeight: 1.5 }}>
-      <div style={{ fontWeight: 600, marginBottom: 6 }}>Enforced by the hook ({rules.length})</div>
-      {rules.length === 0
-        ? <div>No enforced rules. They live in <code>&lt;harnessHome&gt;/hive/policy/engine.json</code> and are read when the app starts.</div>
-        : (
-          <ul style={{ margin: 0, paddingLeft: 16 }}>
-            {rules.map((r) => (
-              <li key={r.id}><code>{r.id}</code>: {what(r)}. {r.reason}</li>
-            ))}
-          </ul>
-        )}
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>Enforced by the hook ({list.length})</div>
+      {rules.file && <div style={{ opacity: 0.7, marginBottom: 6 }}>From <code>{rules.file}</code></div>}
+      {rules.error
+        ? <div style={{ color: 'var(--cth-coral, #c0392b)', fontWeight: 600 }}>The policy file did not load, so nothing is enforced: {rules.error}</div>
+        : list.length === 0
+          ? <div>No enforced rules. They live in <code>&lt;harnessHome&gt;/hive/policy/engine.json</code> and are read when the app starts.</div>
+          : (
+            <ul style={{ margin: 0, paddingLeft: 16 }}>
+              {list.map((r, i) => (
+                <li key={`${i}-${r.id}`}><code>{r.id}</code>: {what(r)}. {r.reason}</li>
+              ))}
+            </ul>
+          )}
       <div style={{ opacity: 0.7, marginTop: 6 }}>Read-only here. Edit engine.json, then restart the app.</div>
     </div>
   );

@@ -47,8 +47,31 @@ test('no policy file, or one that failed to load, lists nothing', () => {
   assert.deepEqual(engineWith('{ not json').enforcedRules(), []);
 });
 
+// Dwight L1: a broken engine.json leaves no rules loaded, which read exactly like no
+// file. The panel gets the load status with the rules and says which it is.
+test('the panel is told the policy file, and why nothing loaded when it is broken', (t) => {
+  const electron = require.resolve('electron');
+  require.cache[electron] = { id: electron, filename: electron, loaded: true,
+    exports: { Notification: class { show() {} static isSupported() { return false; } } } };
+  const { HiveManager } = loadTs('src/main/hive.ts');
+  const { HookServer } = loadTs('src/main/hooks.ts');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-enforced-hook-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(home, 'hive', 'policy'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'hive', 'policy', 'engine.json'), '{ "version": 1, "rules": [ { "id": "x" } ] }');
+  const server = new HookServer(new HiveManager(() => home), () => null, () => ({}), undefined, undefined);
+  const out = server.policyRules();
+  assert.deepEqual(out.rules, []);
+  assert.equal(out.configured, true);
+  assert.match(out.error, /x:/, 'the reason the file did not load');
+  assert.match(out.file, /engine\.json$/);
+  const panel = read('src/renderer/src/components/RulesPanel.tsx');
+  assert.match(panel, /error/);
+  assert.match(panel, /nothing is enforced/i);
+});
+
 test('the panel reads the enforced rules over IPC and shows them even without rules.json', () => {
-  assert.match(read('src/main/hooks.ts'), /policyRules\(\)[^{]*\{[\s\S]{0,200}enforcedRules\(\)/);
+  assert.match(read('src/main/hooks.ts'), /policyRules\(\)[\s\S]{0,500}enforcedRules\(\)/);
   assert.match(read('src/main/index.ts'), /ipcMain\.handle\('policy:rules', \(\) => hookServer\.policyRules\(\)\)/);
   assert.match(read('src/preload/index.ts'), /policyRules:[\s\S]{0,120}ipcRenderer\.invoke\('policy:rules'\)/);
   const panel = read('src/renderer/src/components/RulesPanel.tsx');

@@ -285,13 +285,19 @@ export class HookServer {
     }
   }
 
-  /** Current guardrail status, for fleet.json. Null when no hive is configured. */
-  /** The enforced rules for the Rules panel; empty when there is no hive or policy. */
-  policyRules(): ReturnType<PolicyEngine['enforcedRules']> {
-    if (!this.hive.root()) return [];
-    try { return this.policyEngine().enforcedRules(); } catch { return []; }
+  /** The enforced rules for the Rules panel, with the load status, so a broken file
+   *  (nothing enforced) never reads like no file. */
+  policyRules(): { configured: boolean; file: string | null; error: string | null; rules: ReturnType<PolicyEngine['enforcedRules']> } {
+    const none = { configured: false, file: null, error: null, rules: [] };
+    if (!this.hive.root()) return none;
+    try {
+      const e = this.policyEngine();
+      const st = e.status;
+      return { configured: st.configured, file: st.file, error: st.error, rules: e.enforcedRules() };
+    } catch { return none; }
   }
 
+  /** Current guardrail status, for fleet.json. Null when no hive is configured. */
   policyStatus(): PolicyStatus | null {
     if (!this.hive.root()) return null;
     try { return this.policyEngine().status; } catch { return null; }

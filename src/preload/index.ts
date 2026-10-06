@@ -564,8 +564,7 @@ export interface PreservedWorktreeSnapshot {
   preservedAt: number;
 }
 
-/** One approval waiting for the operator (HAG-49), as main holds it. */
-/** One rule the hook enforces, as the Rules panel lists it. */
+/** The rules the hook enforces, as the Rules panel lists them, with the load status. */
 export interface EnforcedRule {
   id: string;
   decision: string;
@@ -573,7 +572,14 @@ export interface EnforcedRule {
   grantable: string[];
   reason: string;
 }
+export interface EnforcedRules {
+  configured: boolean;
+  file: string | null;
+  error: string | null;
+  rules: EnforcedRule[];
+}
 
+/** One approval waiting for the operator (HAG-49), as main holds it. */
 export interface PendingGrant {
   id: string;
   agent_id: string;
@@ -892,7 +898,7 @@ const api = {
   /** HAG-49 approvals. All three report "off" unless a policy rule is grantable. */
   policyGrantsActive: (): Promise<boolean> => ipcRenderer.invoke('policy:grantsActive'),
   /** The rules the hook enforces (policy/engine.json), read-only, in evaluation order. */
-  policyRules: (): Promise<EnforcedRule[]> => ipcRenderer.invoke('policy:rules'),
+  policyRules: (): Promise<EnforcedRules> => ipcRenderer.invoke('policy:rules'),
   policyPendingGrants: (): Promise<PendingGrant[]> => ipcRenderer.invoke('policy:pendingGrants'),
   policyDecideGrant: (requestId: string, approve: boolean): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('policy:decideGrant', requestId, approve),
