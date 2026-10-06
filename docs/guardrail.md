@@ -1,0 +1,65 @@
+# Guardrail
+
+The guardrail keeps agents to the rules you set, even when they lose track of them.
+
+## Rules: a principle, with an optional backstop
+
+A **rule** is a guiding principle: a sentence every targeted agent is given in its
+instructions ("Do not push without my approval"). Agents can forget a principle under
+pressure, so a rule may also have a **backstop**: a check the hook runs before every
+tool call, which stops the agent if it does the thing anyway.
+
+| Backstop does | What happens |
+|---|---|
+| Block | The call is refused; the agent is told the rule's message. |
+| Ask me | The call stops for you. With "approve on a card", an exact `git push <remote> <sha>:refs/heads/<branch>` instead goes to the Approvals card in ASK ME, and runs after you click Approve. |
+| Log only | Nothing is stopped; the decision is recorded, to try a rule out. |
+
+A rule applies to all agents or to named ones (its backstop too). A rule without a
+backstop is shown as "Principle only, not enforced".
+
+## Where rules live
+
+One file, `<hive>/policy/guardrail.json`, edited in **Settings -> Rules**:
+- add, edit, delete, turn a backstop on or off, and "Try it: would this stop a command?";
+- each save is validated by the engine first, refused if the file changed on disk
+  since the screen loaded it, written atomically with a timestamped backup
+  (`guardrail.json.bak-<time>`, newest 20 kept), and takes effect at once;
+- agents cannot write the policy folder (self-protection), and only the app window saves.
+
+**Turn on guardrail** (Settings -> Rules) adds three starter rules: never merge a pull
+request; never push to master or production-*; push only with approval. Running it
+again adds only what is missing.
+
+The status line at the top of Settings -> General and of the Rules screen says
+"Guardrail active: N rules enforced", or in red why nothing is enforced.
+
+## Approvals
+
+- A push in the approvable form, with no approval, is refused at once and put on the
+  Approvals card; the agent ends its turn and reruns the same command after Approve.
+  The approved push is explicitly allowed (no prompt, whatever the permission mode).
+- Another form of the push to the same remote, while an approval is waiting or
+  unused, is refused with the exact approved command. A push elsewhere asks as usual.
+- An approval works once (the identical retry within 10 minutes is allowed) and
+  lasts 60 minutes. A request waiting longer expires. After Deny, the same push is
+  refused for 10 minutes with no new card.
+- Waiting requests and approvals survive an app restart (`policy/grant-desk.json`).
+- The card warns when the push goes to a different URL than the remote fetches from.
+- A temp waiting on a card is not shut down for being idle.
+
+## Who may talk to the hook server
+
+Each agent the app starts gets its own token (`HIVE_HOOK_TOKEN`, an HMAC of its id
+under a secret made fresh each run). A hook payload that names an agent without its
+token gets the policy decision only: rules still apply, but nothing happens in the
+agent's name (no card, no approval used, no alert, no event). Limit: a same-user
+process that reads an agent's environment can copy its token.
+
+## Moving from engine.json / rules.json
+
+The first start of this build moves `policy/engine.json` (backstops) and
+`policy/rules.json` (principles) into `guardrail.json` and renames them
+`*.migrated-<time>`. A rule the engine would refuse is not moved; the old file stays
+and its error is shown. To go back to an older build, restore the renamed files to
+their old names first: older builds read only `engine.json` and `rules.json`.

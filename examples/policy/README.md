@@ -11,19 +11,21 @@ prompts and memory files, so they depend on salience. Under task pressure an age
 optimises for the immediate goal over a rule it is not actively holding. This moves
 those rules from remembered to enforced.
 
-**Nothing happens until you opt in.** With no `<hive>/policy/engine.json` (and no
-`authority.json`), the engine loads nothing, evaluates nothing, logs nothing and
-denies nothing.
+**Nothing happens until you opt in.** The rules live in one file,
+`<hive>/policy/guardrail.json`, edited in Settings -> Rules (see `docs/guardrail.md`).
+With no such file the engine loads nothing, evaluates nothing, logs nothing and
+denies nothing. "Turn on guardrail" in that screen writes the starter rules.
 
-**Two files, side by side.** `engine.json` is this engine's policy.
-`authority.json` belongs to the older shell guardrail (`hive/bin/guardrail-hook.cjs`,
-schema `match.kind`, `mode: "DRY_RUN"`) and is left exactly as it is. Before md-216
-both readers shared `authority.json`, so the engine rejected every rule with
-`unknown matcher "kind"` and enforced nothing. An `authority.json` in THIS schema is
-still read when there is no `engine.json`. A hook-schema `authority.json` with no
-`engine.json` now fails loudly: god gets a message at startup.
+**This folder is the engine-format reference.** `engine.example.json` below is the
+pack in the engine's own rule format (decision + mode). A `policy/engine.json` in
+that format, and a `policy/rules.json` of plain-text rules, are moved into
+`guardrail.json` once, the first time the app starts, and renamed
+`*.migrated-<time>`. A rule the engine would refuse is not moved: the old file stays
+and its error is shown. `authority.json` belongs to the older shell guardrail
+(`hive/bin/guardrail-hook.cjs`) and is never read as the engine's rules.
 
-**Checking it loaded.** Every start logs `policy-status` with `rules_loaded` to
+**Checking it loaded.** Settings -> General and the Rules screen show
+"Guardrail active: N rules enforced", or in red why nothing is. Every start also logs `policy-status` with `rules_loaded` to
 `log.jsonl` and prints `[policy] rules loaded: N` on stdout; `fleet.json` carries
 the same thing under `policy` on every snapshot. `rules_loaded: 0` with an `error`
 means nothing is enforced.
