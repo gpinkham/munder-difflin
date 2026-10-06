@@ -60,3 +60,16 @@ test('wiring: the screen uses guardrail:read/save/test through the bridge, and t
   assert.match(main, /new GuardrailEditor\(\{\s*\n\s*policyDir: \(\) => \{ const h = readConfig\(\)\.harnessHome/, 'the live harnessHome, never a path fixed at boot');
   assert.match(main, /afterSave: async \(\) => \{ await rules\.reconcile\(\); \}/, 'a save re-renders the agents');
 });
+
+// Finish plan item 10: the same status line at the top of Settings -> General, with a
+// way into Rules, so "is the guardrail on?" never needs the Rules screen to answer.
+test('Settings shows the guardrail status line on General, from the same statusLine', () => {
+  const panel = read('src/renderer/src/components/RulesPanel.tsx');
+  assert.match(panel, /export function GuardrailStatusLine\(/);
+  const comp = panel.slice(panel.indexOf('export function GuardrailStatusLine('));
+  assert.match(comp, /window\.cth\.guardrailRead\(\)/);
+  assert.match(comp, /statusLine\(/);
+  const settings = read('src/renderer/src/components/SettingsModal.tsx');
+  const general = settings.slice(settings.indexOf("activeSection === 'General' && ("), settings.indexOf("activeSection === 'Prerequisites'"));
+  assert.match(general, /<GuardrailStatusLine onOpen=\{\(\) => setActiveSection\('Rules'\)\} \/>/);
+});

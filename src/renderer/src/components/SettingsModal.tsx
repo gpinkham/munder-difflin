@@ -21,7 +21,7 @@ import { OfficeThemePicker } from './OfficeThemePicker';
 import { McpDefaultsSettings } from './McpDefaultsSettings';
 import { IntegrationsRegistry } from './IntegrationsRegistry';
 import { AiEnginesSettings } from './AiEnginesSettings';
-import { RulesPanel } from './RulesPanel';
+import { GuardrailStatusLine, RulesPanel } from './RulesPanel';
 import { REALTIME_MODEL } from '@shared/realtimePricing';
 import { RealtimeDevicePicker } from '@/realtime/DevicePicker';
 import { CostHud } from '@/realtime/CostHud';
@@ -976,6 +976,7 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                   {/* GENERAL */}
                   {activeSection === 'General' && (
                     <>
+                      <GuardrailStatusLine onOpen={() => setActiveSection('Rules')} />
                       {/* Who you are and what this install is — version, plan,
                           sponsor, and the app-level actions that belong to none
                           of the settings below. Slots for a future subscription

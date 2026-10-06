@@ -257,6 +257,28 @@ export function RulesPanel() {
   );
 }
 
+/** Finish plan item 10: the guardrail's state in one line, for the top of Settings.
+ *  The same words as the Rules screen; red when nothing is enforced. */
+export function GuardrailStatusLine({ onOpen }: { onOpen: () => void }) {
+  const [view, setView] = useState<GuardrailView | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    window.cth.guardrailRead().then(
+      (v) => { if (!cancelled) setView(v ?? null); },
+      (e) => { if (!cancelled) setErr(`Could not read the rules: ${e instanceof Error ? e.message : String(e)}`); },
+    );
+    return () => { cancelled = true; };
+  }, []);
+  const st = statusLine(view);
+  return (
+    <div style={{ ...box, ...row, justifyContent: 'space-between', fontSize: 12 }}>
+      <span style={st.bad || err ? red : undefined}>{err ?? st.text}</span>
+      <PixelButton variant="secondary" size="sm" onClick={onOpen}>Rules</PixelButton>
+    </div>
+  );
+}
+
 /** Read-only per-agent view, for the agent modal: the principles this agent is given. */
 export function RulesInEffect({ agentId }: { agentId: string }) {
   const [data, setData] = useState<{ rev: number; rules: Array<{ id: string; text: string }>; deliveredRev: number | null } | null>(null);
