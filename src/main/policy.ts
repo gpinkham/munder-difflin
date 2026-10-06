@@ -286,6 +286,10 @@ export interface PolicyVerdict {
   wouldDeny?: boolean;
   /** The grant that allowed an `ask` rule's action (live), or would have (dry_run). */
   grantId?: string;
+  /** Live, grantable, and approvable but with no grant: denied so that no terminal
+   *  prompt opens (a grant is used on a later call, so it could never answer one).
+   *  The daemon raises the approval card; the agent retries after Approve. */
+  approvalNeeded?: true;
 }
 
 /**
@@ -757,7 +761,7 @@ export class PolicyEngine {
       if (!hit) continue;
 
       const mode = rule.mode ?? this.defaults.mode;
-      const grant = rule.grantable ? this.grantFor(rule, p) : null;
+      const { grant, approvable } = rule.grantable ? this.grantFor(rule, p) : { grant: null, approvable: false };
       if (mode === 'dry_run') {
         // Evaluate fully, log, and ALLOW. You cannot measure a false positive
         // after enforcing, because the deny already stopped the work you would
@@ -779,9 +783,12 @@ export class PolicyEngine {
         this.record(p, verdict);
         return verdict;
       }
-      const verdict: PolicyVerdict = {
-        decision: rule.decision, ruleId: rule.id, reason: rule.reason, mode, matchedOn: hit,
-      };
+      // An approvable action with no grant is denied, not asked: an ask opens Claude
+      // Code's terminal prompt, and the grant the operator mints for it is only used
+      // on a LATER call, so Approve could never answer that prompt.
+      const verdict: PolicyVerdict = approvable
+        ? { decision: 'deny', ruleId: rule.id, reason: rule.reason, mode, matchedOn: hit, approvalNeeded: true }
+        : { decision: rule.decision, ruleId: rule.id, reason: rule.reason, mode, matchedOn: hit };
       this.record(p, verdict);
       return verdict;
     }
@@ -801,17 +808,19 @@ export class PolicyEngine {
     return this.rules.some((r) => Array.isArray(r.grantable) && r.grantable.length > 0);
   }
 
-  /** A grant that covers this exact call, or null. Any error means no grant: it asks. */
-  private grantFor(rule: PolicyRule, p: PolicyPayload): Grant | null {
-    if (rule.decision !== 'ask' || !p.agent_id || !this.policyDir) return null;
+  /** A grant that covers this exact call, or null, and whether a grant COULD cover
+   *  it (the approvable form, for a grantable class). Any error means neither: it asks. */
+  private grantFor(rule: PolicyRule, p: PolicyPayload): { grant: Grant | null; approvable: boolean } {
+    const none = { grant: null, approvable: false };
+    if (rule.decision !== 'ask' || !p.agent_id || !this.policyDir) return none;
     try {
       const input = (p.tool_input ?? {}) as Record<string, unknown>;
-      if (p.tool_name !== 'Bash' || typeof input.command !== 'string') return null;
+      if (p.tool_name !== 'Bash' || typeof input.command !== 'string') return none;
       const c = canonicalAction(input.command, p.cwd, this.gitInspect);
-      if (!c.ok || !rule.grantable!.includes(c.action.class)) return null;
-      return this.grants().findUsable(p.agent_id, c.action);
+      if (!c.ok || !rule.grantable!.includes(c.action.class)) return none;
+      return { grant: this.grants().findUsable(p.agent_id, c.action), approvable: true };
     } catch {
-      return null;
+      return none;
     }
   }
 
@@ -920,6 +929,7 @@ export class PolicyEngine {
       matched_on: v.matchedOn,
       input_digest: digest(p.tool_input),
       ...(v.grantId ? { grant_id: v.grantId } : {}),
+      ...(v.approvalNeeded ? { approval_needed: true } : {}),
     });
   }
 

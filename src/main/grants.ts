@@ -239,19 +239,26 @@ export class GrantDesk {
 
   constructor(private store: GrantStore, private inspect: GitInspector = gitInspector) {}
 
+  /** A new pending request, or the one already waiting for this agent's exact action
+   *  (`fresh: false`): a retry before the operator decides raises no second card. */
   request(agentId: string, input: { command?: unknown; cwd?: unknown; reason?: unknown }, now = Date.now()):
-    { ok: true; request: GrantRequest } | { ok: false; why: string } {
+    { ok: true; request: GrantRequest; fresh: boolean } | { ok: false; why: string } {
     if (typeof input.command !== 'string' || !input.command.trim()) return { ok: false, why: 'the request has no command' };
     const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : null;
     const c = canonicalAction(input.command, cwd, this.inspect);
     if (!c.ok) return c;
+    for (const q of this.pendingById.values()) {
+      if (q.agent_id === agentId && q.action.class === c.action.class && sameTarget(q.action.target, c.action.target)) {
+        return { ok: true, request: q, fresh: false };
+      }
+    }
     const request: GrantRequest = {
       id: newId('r'), agent_id: agentId, command: input.command, cwd,
       reason: typeof input.reason === 'string' ? input.reason.slice(0, 500) : '',
       action: c.action, requested_at: new Date(now).toISOString(),
     };
     this.pendingById.set(request.id, request);
-    return { ok: true, request };
+    return { ok: true, request, fresh: true };
   }
 
   pending(): GrantRequest[] {
