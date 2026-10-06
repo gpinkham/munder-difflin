@@ -98,3 +98,26 @@ test('the starter rules are the day job\'s, and the screen offers the install', 
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'src/preload/index.ts'), 'utf8'), /guardrailInstall:[\s\S]{0,120}ipcRenderer\.invoke\('guardrail:install'\)/);
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'src/main/index.ts'), 'utf8'), /ipcMain\.handle\('guardrail:install', \(\) => guardrailEditor\.install\('user'\)\)/);
 });
+
+// Dwight on items 6-11. M2b: the cap must not stop the starter rules (it is an
+// attention budget for principles, not a reason to leave the floor unguarded). L11: an
+// existing Log rule that matches pushes must not shadow the new ask.
+test('M2b: install goes through even when the principles are at the cap, and says so', async (t) => {
+  const ten = Array.from({ length: 10 }, (_, i) => ({ id: `r${i}`, principle: `Rule ${i}.`, agents: 'all' }));
+  const f = await floor(t, { version: 1, rev: 1, rules: ten });
+  const out = await f.editor.install('gary');
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal(out.added.length, 3);
+  assert.match(out.warning, /over the cap/);
+  assert.equal(f.decide('git push origin master'), 'deny');
+});
+
+test('L11: a new ask goes before an existing rule that is not a block, so a Log rule cannot shadow it', async (t) => {
+  const f = await floor(t, { version: 1, rev: 1, rules: [
+    { id: 'my-push', principle: 'Watch pushes.', agents: 'all', backstop: { on: true, does: 'log', match: { tool: 'Bash', command_matches: '^git\\s+push' } } },
+  ] });
+  await f.editor.install('gary');
+  const g = JSON.parse(fs.readFileSync(f.file, 'utf8'));
+  assert.deepEqual(g.rules.map((r) => r.id), ['bitbucket-merge', 'protected-branch-push', 'remote-push', 'my-push']);
+  assert.equal(f.decide('git push origin feat/x'), 'ask');
+});

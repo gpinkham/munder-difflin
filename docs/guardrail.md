@@ -51,6 +51,8 @@ The status line at the top of Settings -> General and of the Rules screen says
 - A temp waiting on a card is not shut down for being idle.
 - If a waiting request expires, or approvals are turned off in the rules, the agent
   is told its request was dropped.
+- After Deny, the hold covers that exact push (agent, remote, branch, commit); a
+  different form of it asks in the terminal as usual.
 - Known limit: a plain `git push` whose branch pushes to a remote other than
   `origin` (branch.<name>.pushRemote, remote.pushDefault) is matched against
   `origin`, so it can be refused with the exact command when it would have asked.
@@ -73,3 +75,6 @@ The first start of this build moves `policy/engine.json` (backstops) and
 silently: a rule the engine would refuse, a duplicate id, or a scope that is not all
 agents or a list stops the move, the old files stay, and the error is shown. To go back to an older build, restore the renamed files to
 their old names first: older builds read only `engine.json` and `rules.json`.
+Changes made on the Rules screen after the move are not in the renamed files, and a
+hive set up with "Turn on guardrail" has no old files at all: an older build then
+enforces nothing.

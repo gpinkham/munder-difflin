@@ -107,7 +107,7 @@ export function RulesPanel() {
     try {
       const out = await window.cth.guardrailInstall();
       if (!out.ok) setErrors(out.errors);
-      else setNote(out.added.length ? `Guardrail on: added ${out.added.join(', ')}. In effect now.` : 'The starter rules are already there.');
+      else setNote((out.added.length ? `Guardrail on: added ${out.added.join(', ')}. In effect now.` : 'The starter rules are already there.') + (out.ok && out.warning ? ` Note: ${out.warning}.` : ''));
     } catch (e) { setErrors([e instanceof Error ? e.message : String(e)]); }
     setBusy(false);
     await load();

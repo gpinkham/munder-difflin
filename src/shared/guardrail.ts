@@ -76,7 +76,7 @@ export interface GuardrailView {
 }
 
 export type GuardrailSaveResult =
-  | { ok: true; rev: number; stamp: number | null; status: GuardrailStatus | null }
+  | { ok: true; rev: number; stamp: number | null; status: GuardrailStatus | null; warning?: string }
   | { ok: false; reason: 'invalid' | 'changed-on-disk' | 'broken-file' | 'no-hive' | 'write-failed'; errors: string[] };
 
 export interface GuardrailTestResult { fires: boolean; does?: string; on?: string; error?: string }

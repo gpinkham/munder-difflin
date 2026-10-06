@@ -59,7 +59,8 @@ export class GuardrailEditor {
     return this.d.principles.capReportFor(toPrinciples(file), this.d.agentIds());
   }
 
-  async save(next: GuardrailFile, expectedStamp: number | null, actor: string): Promise<GuardrailSaveResult> {
+  /** `capCheck: false` (the install only): the cap becomes a warning, not a refusal. */
+  async save(next: GuardrailFile, expectedStamp: number | null, actor: string, opts: { capCheck?: boolean } = {}): Promise<GuardrailSaveResult> {
     const p = this.path();
     if (!p) return { ok: false, reason: 'no-hive', errors: ['no hive is open'] };
     const nowStamp = existsSync(p) ? guardrailVersionStamp(p) : null;
@@ -75,6 +76,7 @@ export class GuardrailEditor {
     const rev = (current?.ok ? current.file.rev : 0) + 1;
     const file: GuardrailFile = { ...next, version: 1, rev };
     const errors = validateGuardrail(file);
+    let capWarning: string | null = null;
     // The engine's own check (regexes, matcher values) on every rule whose shape is
     // fine, so one save shows every problem rather than one layer at a time.
     const shapeBad = new Set(errors.map((e) => e.split(': ')[0]));
@@ -97,9 +99,11 @@ export class GuardrailEditor {
         ? worse(cap.global, before?.global)
         : worse(cap.perAgent[k], before?.perAgent[k])));
       if (cap.over.length) {
-        errors.push(cap.over.includes('global')
+        const msg = cap.over.includes('global')
           ? `over the cap: ${cap.global.count} principles for all agents (max ${cap.global.max}, about ${cap.global.maxTokens} tokens)`
-          : `over the cap for ${cap.over.join(', ')} (max ${Object.values(cap.perAgent)[0]?.max ?? ''} principles each)`);
+          : `over the cap for ${cap.over.join(', ')} (max ${Object.values(cap.perAgent)[0]?.max ?? ''} principles each)`;
+        if (opts.capCheck === false) capWarning = `${msg}; consider removing or shortening a principle`;
+        else errors.push(msg);
       }
     }
     if (errors.length) return { ok: false, reason: 'invalid', errors };
@@ -118,7 +122,7 @@ export class GuardrailEditor {
       rules_loaded: status?.rulesLoaded ?? null, error: status?.error ?? null,
     });
     try { await this.d.afterSave(); } catch { /* the agents catch up at the next reconcile */ }
-    return { ok: true, rev, stamp: guardrailVersionStamp(p), status };
+    return { ok: true, rev, stamp: guardrailVersionStamp(p), status, ...(capWarning ? { warning: capWarning } : {}) };
   }
 
   /**
@@ -140,7 +144,15 @@ export class GuardrailEditor {
     const blocks = missing.filter((r) => r.backstop?.does === 'block');
     const rest = missing.filter((r) => r.backstop?.does !== 'block');
     const base: GuardrailFile = cur.file ?? { version: 1, rev: 0, rules: [] };
-    const out = await this.save({ ...base, rules: [...blocks, ...base.rules, ...rest] }, cur.stamp, actor);
+    // First match wins. New blocks go first; new asks go before the first existing rule
+    // that does not block (an existing Ask or Log rule must not shadow them, Dwight
+    // L11); principles without a backstop and existing blocks keep their places.
+    const cut = base.rules.findIndex((r) => r.backstop && r.backstop.does !== 'block');
+    const at = cut === -1 ? base.rules.length : cut;
+    const rules = [...blocks, ...base.rules.slice(0, at), ...rest, ...base.rules.slice(at)];
+    // The starter rules are safety, not prose: the principles cap warns, never refuses
+    // them (Dwight M2b).
+    const out = await this.save({ ...base, rules }, cur.stamp, actor, { capCheck: false });
     return { ...out, added: out.ok ? missing.map((r) => r.id) : [] };
   }
 
