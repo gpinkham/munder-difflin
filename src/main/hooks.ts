@@ -31,6 +31,9 @@ export const GRANT_DESK_SENDER = 'grant-desk';
 
 /** A policy ask counts as the cause of a permission prompt for this long. */
 const POLICY_PROMPT_WINDOW_MS = 60_000;
+/** How long after an approved push is allowed its request to leave the sandbox is
+ *  answered. Claude Code asks within a second; anything later is not that run's. */
+const APPROVED_RUN_WINDOW_MS = 60_000;
 /** Events that mean the agent is past the prompt, whichever way it was answered. */
 const ANSWERED_EVENTS = WORKER_WAKE_ANSWERED_EVENTS;
 function isPermissionPrompt(p: { notification_type?: string; message?: string }): boolean {
@@ -161,6 +164,8 @@ export class HookServer {
   /** The last policy `ask` per agent, so the permission prompt it raises can be told
    *  apart from one Claude raises on its own. Only a loaded policy ever sets it. */
   private policyAsks = new Map<string, { ruleId: string; at: number; cardId?: string }>();
+  /** The approved push each agent was last allowed to run outside the sandbox. */
+  private approvedRuns = new Map<string, { command: string; at: number }>();
   /** The approval desk (HAG-49), built only when a loaded rule is grantable. */
   private desk: GrantDesk | null | undefined = undefined;
 
@@ -656,6 +661,18 @@ If it says "Denied", do not push.`;
     if (this.hookAuth && agentId && !this.hookAuth.verify(agentId, (p as { hook_token?: unknown }).hook_token)) {
       return this.unauthenticated(agentId, event, p);
     }
+    // The approved push just allowed above asks to leave the sandbox: that request is
+    // the operator's Approve too. Only the same agent, the exact command, once, soon.
+    if (event === 'PermissionRequest' && agentId) {
+      const run = this.approvedRuns.get(agentId);
+      const input = p.tool_input as { command?: unknown; dangerouslyDisableSandbox?: unknown } | undefined;
+      if (run && Date.now() - run.at < APPROVED_RUN_WINDOW_MS && p.tool_name === 'Bash'
+        && input?.command === run.command && input?.dangerouslyDisableSandbox === true) {
+        this.approvedRuns.delete(agentId);
+        this.hive.appendLog({ kind: 'grant-sandbox-exit', agent_id: agentId } as Parameters<HiveManager['appendLog']>[0]);
+        return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } };
+      }
+    }
     this.onEvent?.(agentId, event, p.message, p);
     if (agentId && typeof p.transcript_path === 'string' && p.transcript_path) {
       this.transcriptPaths.set(agentId, p.transcript_path);
@@ -848,12 +865,20 @@ If it says "Denied", do not push.`;
           // The operator's Approve IS the permission. Without an explicit allow an agent
           // that is not in bypassPermissions stops at Claude Code's own prompt for the
           // very push that was approved (day job, 2026-10-06).
+          // The allow answers the permission check but not the sandbox's: its network
+          // check for the remote's host is a prompt of its own (third day-job report,
+          // reproduced with Claude Code 2.1.291). So the approved push runs outside
+          // the sandbox, and the one request to leave it is answered below.
+          const input = p.tool_input && typeof p.tool_input === 'object' ? p.tool_input as Record<string, unknown> : null;
+          const command = input && typeof input.command === 'string' ? input.command : null;
+          if (agentId && p.tool_name === 'Bash' && command) this.approvedRuns.set(agentId, { command, at: Date.now() });
           this.emit(agentId, event, p);
           return {
             hookSpecificOutput: {
               hookEventName: 'PreToolUse',
               permissionDecision: 'allow',
-              permissionDecisionReason: `[policy:${v.ruleId}] Approved by the operator (grant ${v.grantId}).`
+              permissionDecisionReason: `[policy:${v.ruleId}] Approved by the operator (grant ${v.grantId}).`,
+              ...(command ? { updatedInput: { ...input, dangerouslyDisableSandbox: true } } : {})
             }
           };
         }

@@ -375,6 +375,45 @@ test('on: a push with no grant is denied, raises its own Approvals card once, an
   assert.match(f.log(), /"kind":"grant-requested"[^\n]*"via":"hook"/);
 });
 
+// Day job 2026-10-06, third report, reproduced with a real Claude Code 2.1.291: the
+// granted allow IS honoured, but an agent's Bash runs in the sandbox, whose network
+// check for the remote's host is a prompt of its own that no PreToolUse allow
+// answers. So the approved push runs outside the sandbox, and the one permission
+// request that leaving it raises, for that exact command, is answered here.
+test('on: the approved push runs outside the sandbox, and its one sandbox prompt is answered', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  const permissionRequest = (command, extra = {}, agent = 'jim-1') => f.server.handle({
+    agent_id: agent, session_id: 's1', hook_event_name: 'PermissionRequest', tool_name: 'Bash',
+    tool_input: { command, description: 'push', dangerouslyDisableSandbox: true, ...extra }, cwd: origin,
+  });
+  const behaviorOf = (out) => out?.hookSpecificOutput?.decision?.behavior ?? 'none';
+  assert.equal(behaviorOf(await permissionRequest(PUSH)), 'none', 'before any approval, the user decides');
+  await hook(f, PUSH, origin);
+  const [p] = f.server.pendingGrants();
+  f.server.decideGrant(p.id, true);
+  assert.equal(behaviorOf(await permissionRequest(PUSH)), 'none', 'approved but not yet run: nothing to answer');
+  const granted = await f.server.handle({
+    agent_id: 'jim-1', session_id: 's1', hook_event_name: 'PreToolUse', tool_name: 'Bash',
+    tool_input: { command: PUSH, description: 'push' }, cwd: origin,
+  });
+  assert.equal(decisionOf(granted), 'allow');
+  assert.deepEqual(granted.hookSpecificOutput.updatedInput, { command: PUSH, description: 'push', dangerouslyDisableSandbox: true },
+    'the same input, run outside the sandbox');
+  assert.equal(behaviorOf(await permissionRequest(PUSH, { dangerouslyDisableSandbox: false })), 'none', 'only the request to leave the sandbox');
+  assert.equal(behaviorOf(await permissionRequest(`${PUSH} && echo x`)), 'none', 'only the exact approved command');
+  assert.equal(behaviorOf(await permissionRequest(PUSH, {}, 'pam-1')), 'none', 'only the agent the push was approved for');
+  const answered = await permissionRequest(PUSH);
+  assert.deepEqual(answered, { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } });
+  assert.equal(behaviorOf(await permissionRequest(PUSH)), 'none', 'answered once');
+  // A request long after the run is not this run's: the user decides.
+  await hook(f, PUSH, origin);
+  const now = Date.now;
+  Date.now = () => now() + 5 * 60_000;
+  try { assert.equal(behaviorOf(await permissionRequest(PUSH)), 'none', 'stale'); } finally { Date.now = now; }
+  assert.match(f.log(), /"kind":"grant-sandbox-exit"[^\n]*"agent_id":"jim-1"/);
+});
+
 test('on: an approval-request sent first is the card; the push before Approve adds no second one', async (t) => {
   const origin = gitRepo(t);
   const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
