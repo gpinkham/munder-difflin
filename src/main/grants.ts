@@ -80,8 +80,9 @@ export interface GitInspector {
   pushUrl(dir: string, remote: string): string | null;
   /** Why one approved push could publish more than its ref, or null when it cannot. */
   pushRisk(dir: string): string | null;
-  /** True when `git push <url>` from this repo would send somewhere else: an
-   *  insteadOf or pushInsteadOf rule applies to a URL too. True when it cannot tell. */
+  /** True when `git push <url>` from this repo could send somewhere else: a remote
+   *  named as the URL, or an insteadOf or pushInsteadOf rule (they apply to a URL
+   *  too). True when it cannot tell. */
   rewritesUrl?(dir: string, url: string): boolean;
   /** Where the remote FETCHES from, to flag a push that goes elsewhere (item 6). */
   fetchUrl?(dir: string, remote: string): string | null;
@@ -98,6 +99,12 @@ export const gitInspector: GitInspector = {
     try { return git(dir, ['remote', 'get-url', '--push', remote]) || null; } catch { return null; }
   },
   rewritesUrl(dir, url) {
+    // Dwight M2b: `git push <arg>` reads <arg> as a remote NAME first, so a remote
+    // named after the URL sends the push wherever its own urls say. get-url exits 2
+    // only when no such remote exists; anything else keeps the push in the sandbox.
+    try { git(dir, ['remote', 'get-url', '--push', url]); return true; } catch (e) {
+      if ((e as { status?: number }).status !== 2) return true;
+    }
     // Any rule whose prefix the URL starts with, at any config level. Broader than
     // git's own choice of rule, so it can only keep a push in the sandbox, never let
     // a rewritten one out.

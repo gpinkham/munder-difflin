@@ -46,7 +46,8 @@ The status line at the top of Settings -> General and of the Rules screen says
   `git -C <repo> push <approved url> <sha>:<ref>`, never the agent's text. Anything
   git runs for that push (the repo's pre-push hook, for one) runs outside it too.
   The push stays in the sandbox, and the network prompt can come back, when an
-  insteadOf or pushInsteadOf rule matches the URL or the repo cannot be placed.
+  insteadOf or pushInsteadOf rule matches the URL, a remote is named as the URL, or
+  the repo cannot be placed.
 - Pushed by URL, the push does not update the agent's remote-tracking ref (and drops
   `-u`): `git status` can look behind until the next `git fetch`.
 - Another form of the push to the same remote, while an approval is waiting or

