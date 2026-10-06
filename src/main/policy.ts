@@ -449,8 +449,8 @@ export class PolicyEngine {
       try { hookSchema = !!legacy && typeof legacy === 'object' && isHookSchema(legacy as PolicyFile); } catch { /* not the hook's either */ }
       this.fail(hookSchema
         ? `${LEGACY_POLICY_FILE} is the guardrail-hook schema (match.kind), which this engine does not read; `
-          + `the engine's rules live in ${GUARDRAIL_FILE}. 0 engine rules loaded.`
-        : `${LEGACY_POLICY_FILE} is not read by the engine; the rules live in ${GUARDRAIL_FILE}. 0 engine rules loaded.`);
+          + `the engine's rules live in ${GUARDRAIL_FILE} (Settings → Rules → Turn on guardrail). 0 engine rules loaded.`
+        : `${LEGACY_POLICY_FILE} is not read by the engine; the rules live in ${GUARDRAIL_FILE} (Settings → Rules → Turn on guardrail). 0 engine rules loaded.`);
       return;
     }
     this.policyPath = guardrailPath;

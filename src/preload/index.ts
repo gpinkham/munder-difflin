@@ -1403,6 +1403,8 @@ const api = {
   guardrailRead: (): Promise<GuardrailView> => ipcRenderer.invoke('guardrail:read'),
   guardrailSave: (file: GuardrailFile, stamp: number | null): Promise<GuardrailSaveResult> =>
     ipcRenderer.invoke('guardrail:save', file, stamp),
+  /** "Turn on guardrail": add the starter rules that are missing (idempotent). */
+  guardrailInstall: (): Promise<GuardrailSaveResult & { added: string[] }> => ipcRenderer.invoke('guardrail:install'),
   guardrailTest: (rule: GuardrailRule, command: string, agentId?: string): Promise<GuardrailTestResult> =>
     ipcRenderer.invoke('guardrail:test', rule, command, agentId),
 

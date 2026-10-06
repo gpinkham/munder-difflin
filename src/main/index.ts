@@ -3579,6 +3579,7 @@ const guardrailEditor = new GuardrailEditor({
 ipcMain.handle('guardrail:read', () => guardrailEditor.read());
 ipcMain.handle('guardrail:save', (_evt, file: unknown, stamp: unknown) =>
   guardrailEditor.save(file as never, typeof stamp === 'number' ? stamp : null, 'user'));
+ipcMain.handle('guardrail:install', () => guardrailEditor.install('user'));
 ipcMain.handle('guardrail:test', (_evt, rule: unknown, command: unknown, agentId: unknown) =>
   typeof command === 'string'
     ? guardrailEditor.test(rule as never, command, typeof agentId === 'string' ? agentId : undefined)

@@ -99,6 +99,18 @@ export function RulesPanel() {
     } catch (e) { setTried({ fires: false, error: e instanceof Error ? e.message : String(e) }); }
   };
 
+  /** "Turn on guardrail" (item 9): main adds the starter rules that are missing. */
+  const install = async () => {
+    setBusy(true); setErrors([]); setNote(null);
+    try {
+      const out = await window.cth.guardrailInstall();
+      if (!out.ok) setErrors(out.errors);
+      else setNote(out.added.length ? `Guardrail on: added ${out.added.join(', ')}. In effect now.` : 'The starter rules are already there.');
+    } catch (e) { setErrors([e instanceof Error ? e.message : String(e)]); }
+    setBusy(false);
+    await load();
+  };
+
   const set = (patch: Partial<Draft>) => setDraft((d) => (d ? { ...d, ...patch } : d));
   const nameOf = (id: string) => targetable.find((a) => a.id === id)?.name ?? id;
   const startEdit = (d: Draft) => { setDraft(d); setErrors([]); setTried(null); setTryCmd(''); setNote(null); };
@@ -124,9 +136,20 @@ export function RulesPanel() {
       )}
 
       {rules.length === 0 && view && !view.error && (
-        <div style={{ ...box, fontSize: 12 }}>
-          No rules yet. A rule is a sentence your agents are given, for example &quot;Do not push without my
-          approval&quot;. Add a backstop to have the hook enforce it.
+        <div style={{ ...box, fontSize: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div>
+            No rules yet. A rule is a sentence your agents are given, for example &quot;Do not push without my
+            approval&quot;. Add a backstop to have the hook enforce it.
+          </div>
+          <div style={row}>
+            <PixelButton variant="primary" size="sm" disabled={busy} onClick={() => void install()}>Turn on guardrail</PixelButton>
+            <span style={{ opacity: 0.75 }}>Adds three rules: never merge a pull request; never push to master or production-*; push only with your approval (approve on a card).</span>
+          </div>
+        </div>
+      )}
+      {rules.length > 0 && !draft && (
+        <div style={{ fontSize: 11 }}>
+          <PixelButton variant="secondary" size="sm" disabled={busy} onClick={() => void install()}>Add any missing starter rules</PixelButton>
         </div>
       )}
 

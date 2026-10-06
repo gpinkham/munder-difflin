@@ -16,6 +16,7 @@ import {
 } from './guardrail';
 import type { PolicyPayload, PolicyRule, PolicyStatus } from './policy';
 import type { RulesManager } from './rules';
+import { STARTER_RULES } from './guardrailStarter';
 import type { GuardrailSaveResult, GuardrailTestResult, GuardrailView } from '../shared/guardrail';
 
 export interface GuardrailEditorDeps {
@@ -103,6 +104,29 @@ export class GuardrailEditor {
     });
     try { await this.d.afterSave(); } catch { /* the agents catch up at the next reconcile */ }
     return { ok: true, rev, stamp: guardrailVersionStamp(p), status };
+  }
+
+  /**
+   * "Turn on guardrail" (finish plan item 9): add the starter rules that are missing,
+   * by id, blocks before the existing rules and asks after them (the first matching
+   * backstop wins). A rule already there is left as the operator set it. Nothing
+   * missing: nothing written. A broken file is never overwritten.
+   */
+  async install(actor: string): Promise<(GuardrailSaveResult & { added: string[] }) | { ok: false; reason: 'invalid'; errors: string[]; added: string[] }> {
+    const cur = this.read();
+    if (cur.exists && !cur.file) {
+      return { ok: false, reason: 'invalid', added: [], errors: [`the rules file is broken (${cur.error}); fix it or restore a backup first`] };
+    }
+    const have = new Set((cur.file?.rules ?? []).map((r) => r.id));
+    const missing = STARTER_RULES.filter((r) => !have.has(r.id)).map((r) => JSON.parse(JSON.stringify(r)) as GuardrailRule);
+    if (!missing.length) {
+      return { ok: true, added: [], rev: cur.file?.rev ?? 0, stamp: cur.stamp, status: cur.status };
+    }
+    const blocks = missing.filter((r) => r.backstop?.does === 'block');
+    const rest = missing.filter((r) => r.backstop?.does !== 'block');
+    const base: GuardrailFile = cur.file ?? { version: 1, rev: 0, rules: [] };
+    const out = await this.save({ ...base, rules: [...blocks, ...base.rules, ...rest] }, cur.stamp, actor);
+    return { ...out, added: out.ok ? missing.map((r) => r.id) : [] };
   }
 
   /** Would this rule's backstop stop `command` (a Bash call) for `agentId`? */
