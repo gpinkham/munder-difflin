@@ -181,7 +181,11 @@ test('M5: a subagent finishing is not its agent finishing (server and renderer)'
   assert.deepEqual(notified, [['jim-1', 'finished — idle']], 'the agent\'s own Stop still is');
   const hive = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/src/hooks/useHive.ts'), 'utf8');
   assert.doesNotMatch(hive, /e\.event === 'Stop' \|\| e\.event === 'SubagentStop'/, 'the renderer does not treat it as Stop');
-  assert.match(hive, /e\.event === 'SubagentStop'\) \{[\s\S]{0,300}status: 'working'/, 'it counts as activity');
+  // Dwight L14: it leaves the status alone. Setting 'working' would flip a parent that
+  // already stopped (a background subagent ending later) back to working for good.
+  const branch = hive.slice(hive.indexOf("e.event === 'SubagentStop') {"), hive.indexOf("} else if (e.event === 'Stop') {"));
+  assert.ok(branch.length > 0, 'a SubagentStop branch of its own');
+  assert.doesNotMatch(branch, /updateAgent\(/, 'no status change');
 });
 
 test('M5 through the real shim: an Explore subagent ending gives no idle notice', async (t) => {
