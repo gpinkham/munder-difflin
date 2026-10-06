@@ -243,6 +243,8 @@ export interface PolicyFile {
 /** Per-evaluation scratch, so one payload is parsed once however many rules read it. */
 interface EvalContext {
   commands: EffectiveCommand[] | null;
+  /** False for an unauthenticated hook: approvals are neither used nor offered. */
+  grants?: boolean;
 }
 
 export interface PolicyPayload {
@@ -752,11 +754,13 @@ export class PolicyEngine {
    *
    * Only PreToolUse is considered; every other event returns allow untouched.
    */
-  evaluate(p: PolicyPayload): PolicyVerdict {
+  evaluate(p: PolicyPayload, opts: { grants?: boolean } = {}): PolicyVerdict {
     if (p.hook_event_name !== 'PreToolUse') return { decision: 'allow' };
     if (!this.configured) return { decision: 'allow' }; // unconfigured → byte-identical
 
-    const ctx: EvalContext = { commands: null };
+    // grants: false (an unauthenticated hook): no approval is looked up, used or
+    // offered, so the rule decides as if it were not grantable.
+    const ctx: EvalContext = { commands: null, grants: opts.grants !== false };
     const verdict = this.decide(p, ctx);
     // AFTER the verdict, and it cannot change it — the row carries the decision that
     // was actually returned, so a reader can tell a blind spot that was allowed from
@@ -815,7 +819,7 @@ export class PolicyEngine {
       if (!hit) continue;
 
       const mode = rule.mode ?? this.defaults.mode;
-      const { grant, approvable } = rule.grantable ? this.grantFor(rule, p) : { grant: null, approvable: false };
+      const { grant, approvable } = rule.grantable && ctx.grants !== false ? this.grantFor(rule, p) : { grant: null, approvable: false };
       if (mode === 'dry_run') {
         // Evaluate fully, log, and ALLOW. You cannot measure a false positive
         // after enforcing, because the deny already stopped the work you would
@@ -842,7 +846,7 @@ export class PolicyEngine {
       // on a LATER call, so Approve could never answer that prompt.
       const verdict: PolicyVerdict = approvable
         ? { decision: 'deny', ruleId: rule.id, reason: rule.reason, mode, matchedOn: hit, approvalNeeded: true }
-        : { decision: rule.decision, ruleId: rule.id, reason: rule.reason, mode, matchedOn: hit, ...(rule.grantable ? { notApprovable: true as const } : {}) };
+        : { decision: rule.decision, ruleId: rule.id, reason: rule.reason, mode, matchedOn: hit, ...(rule.grantable && ctx.grants !== false ? { notApprovable: true as const } : {}) };
       this.record(p, verdict, ctx);
       return verdict;
     }

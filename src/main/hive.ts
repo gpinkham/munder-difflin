@@ -881,6 +881,8 @@ export class HiveManager {
       const sock = this.sockPath();
       if (desc && sock) {
         env.HIVE_SOCK = sock;
+        const token = this.hookToken?.(meta.id);
+        if (token) env.HIVE_HOOK_TOKEN = token;
         try {
           if (desc.kind === 'hooks') {
             if (desc.shim === 'agy') this.installAgyHooks();
@@ -1012,6 +1014,8 @@ export class HiveManager {
     const shim = this.shimPath();
     if (sock && shim) {
       env.HIVE_SOCK = sock;
+      const token = this.hookToken?.(meta.id);
+      if (token) env.HIVE_HOOK_TOKEN = token;
       const settingsPath = join(dir, 'settings.json');
       this.writeJson(settingsPath, this.hookSettings(shim, meta.cwd, opts.mcpDefaults, opts.theme, this.sandboxWritableDirs(meta, dir, root, opts.extraWritableDirs)));
       args.push('--settings', settingsPath);
@@ -1376,6 +1380,7 @@ export class HiveManager {
             ELECTRON_RUN_AS_NODE: '1',
             HIVE_SOCK: cfg.sock,
             AGENT_ID: agentId,
+            HIVE_HOOK_TOKEN: this.hookToken?.(agentId) ?? '',
             UPSTREAM_BASE_URL: cfg.upstream,
             HIVE_PROXY_SESSION: cfg.sessionId,
             HIVE_PROXY_API: cfg.api
@@ -1728,6 +1733,13 @@ export class HiveManager {
   /** HAG-49: takes an agent's `approval-request` outbox message. Returns true when it
    *  handled it; false leaves the message to ordinary routing. Unset unless grants are on. */
   private approvalHandler: ((agentId: string, msg: Record<string, unknown>) => boolean) | null = null;
+  /** Finish plan item 5: the hook token each agent this manager starts is given
+   *  (HIVE_HOOK_TOKEN), so the hook server can tell its own agents from a forger. */
+  private hookToken: ((agentId: string) => string) | null = null;
+  setHookTokens(fn: ((agentId: string) => string) | null): void {
+    this.hookToken = fn;
+  }
+
   setApprovalHandler(fn: ((agentId: string, msg: Record<string, unknown>) => boolean) | null): void {
     this.approvalHandler = fn;
   }
@@ -3084,7 +3096,7 @@ process.stdin.on('end', () => {
     }
     if (sock) {
       try {
-        const c = net.createConnection(sock, () => { c.end(JSON.stringify(payload) + '\\n'); });
+        const c = net.createConnection(sock, () => { c.end(JSON.stringify(Object.assign(payload, { hook_token: process.env.HIVE_HOOK_TOKEN || null })) + '\\n'); });
         c.on('error', () => {});
         c.on('close', () => process.exit(0));
       } catch (_) { process.exit(0); }
@@ -3133,7 +3145,7 @@ process.stdin.on('end', () => {
   // cannot fall through into net.createConnection(undefined, …) and die with a TypeError.
   if (!sock) { return failopen('no_socket'); }
   const done = (code) => { if (resp) process.stdout.write(resp); process.exit(code); };
-  const c = net.createConnection(sock, () => c.write(JSON.stringify(payload) + '\\n'));
+  const c = net.createConnection(sock, () => c.write(JSON.stringify(Object.assign(payload, { hook_token: process.env.HIVE_HOOK_TOKEN || null })) + '\\n'));
   c.setEncoding('utf8');
   c.on('data', (d) => { resp += d; });
   c.on('end', () => done(0));
@@ -3196,7 +3208,7 @@ process.stdin.on('end', () => {
     process.exit(0);
   };
   try {
-    const c = net.createConnection(sock, () => c.write(JSON.stringify(payload) + '\\n'));
+    const c = net.createConnection(sock, () => c.write(JSON.stringify(Object.assign(payload, { hook_token: process.env.HIVE_HOOK_TOKEN || null })) + '\\n'));
     c.setEncoding('utf8');
     c.on('data', (d) => { resp += d; });
     c.on('end', done);
@@ -3223,7 +3235,7 @@ function post(payload) {
   try {
     if (!SOCK) return;
     payload.agent_id = payload.agent_id || AGENT;
-    var c = net.createConnection(SOCK, function () { try { c.end(JSON.stringify(payload) + '\\n'); } catch (e) {} });
+    var c = net.createConnection(SOCK, function () { try { c.end(JSON.stringify(Object.assign(payload, { hook_token: process.env.HIVE_HOOK_TOKEN || null })) + '\\n'); } catch (e) {} });
     c.on('error', function () {});
   } catch (e) {}
 }
@@ -3260,7 +3272,7 @@ function post(payload) {
   try {
     if (!SOCK) return;
     payload.agent_id = payload.agent_id || AGENT;
-    const c = createConnection(SOCK, () => { try { c.end(JSON.stringify(payload) + '\\n'); } catch (e) {} });
+    const c = createConnection(SOCK, () => { try { c.end(JSON.stringify(Object.assign(payload, { hook_token: process.env.HIVE_HOOK_TOKEN || null })) + '\\n'); } catch (e) {} });
     c.on('error', () => {});
   } catch (e) {}
 }
@@ -3319,7 +3331,7 @@ function ctxSize(model) {
 function emit(payload) {
   if (!SOCK) return;
   try {
-    const c = net.createConnection(SOCK, function () { c.end(JSON.stringify(payload) + '\\n'); });
+    const c = net.createConnection(SOCK, function () { c.end(JSON.stringify(Object.assign(payload, { hook_token: process.env.HIVE_HOOK_TOKEN || null })) + '\\n'); });
     c.on('error', function () {});
   } catch (e) {}
 }
@@ -3549,7 +3561,7 @@ process.stdin.on('end', () => {
     process.exit(0);
   };
   try {
-    const c = net.createConnection(sock, () => c.write(JSON.stringify(payload) + '\\n'));
+    const c = net.createConnection(sock, () => c.write(JSON.stringify(Object.assign(payload, { hook_token: process.env.HIVE_HOOK_TOKEN || null })) + '\\n'));
     c.setEncoding('utf8');
     c.on('data', (d) => { resp += d; });
     c.on('end', done);
@@ -3623,7 +3635,7 @@ process.stdin.on('end', () => {
     process.exit(0);
   };
   try {
-    const c = net.createConnection(sock, () => c.write(JSON.stringify(payload) + '\\n'));
+    const c = net.createConnection(sock, () => c.write(JSON.stringify(Object.assign(payload, { hook_token: process.env.HIVE_HOOK_TOKEN || null })) + '\\n'));
     c.setEncoding('utf8');
     c.on('data', (d) => { resp += d; });
     c.on('end', done);

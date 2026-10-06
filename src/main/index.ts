@@ -62,6 +62,7 @@ import { IntegrationBroker } from './integrationBroker';
 import * as integrations from './integrations';
 import { validateBaseUrl, buildAuthHeaders, resolveUpstreamUrl, secretRefFor, INTEGRATION_TEMPLATES } from '../shared/integrations';
 import { RosterStore } from './roster';
+import { HookAuth } from './hookAuth';
 import { GuardrailEditor } from './guardrailEditor';
 import { RulesManager } from './rules';
 import { buildWorkerLaunch } from './workerLaunch';
@@ -356,6 +357,11 @@ const hookServer = new HookServer(
   (agentId) => rules.takeNotice(agentId),
   (agentId) => rules.fullSet(agentId)
 );
+// Finish plan item 5: one secret per app run. Every agent the hive starts gets its
+// token (HIVE_HOOK_TOKEN); the hook server takes nothing in an agent's name without it.
+const hookAuth = new HookAuth();
+hookServer.setHookAuth(hookAuth);
+hive.setHookTokens((id) => hookAuth.token(id));
 const memory = new MemoryManager(
   () => readConfig().harnessHome,
   () => { const c = readConfig(); return { enabled: c.semanticMemory !== false, model: c.embeddingModel ?? 'minilm' }; }

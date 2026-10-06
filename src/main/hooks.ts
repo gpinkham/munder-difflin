@@ -22,6 +22,7 @@ import { estimateCostUsd } from './pricing';
 import { validateHookEvent } from '../shared/hookEvents';
 import { PolicyEngine, type AgentWorkspace, type PolicyPayload, type PolicyRule, type PolicyStatus } from './policy';
 import { ReportCheck, REPORT_CHECK_SENDER, type ReportMessage } from './reportCheck';
+import type { HookAuth } from './hookAuth';
 import { GrantDesk, GrantStore, type GrantRequest } from './grants';
 import { WORKER_WAKE_ANSWERED_EVENTS } from './workerWake';
 
@@ -283,6 +284,32 @@ export class HookServer {
         }, 'guardrail');
       } catch (e) { console.error('[policy] could not notify god:', e); }
     }
+  }
+
+  private hookAuth: HookAuth | null = null;
+  /** Turn on the hook token check (index.ts does, with the HookAuth the agents' tokens
+   *  come from). Without it every payload is taken at its word, as before item 5. */
+  setHookAuth(auth: HookAuth | null): void {
+    this.hookAuth = auth;
+  }
+
+  private unauthLogged = new Map<string, number>();
+  /** A payload that names an agent without its token: enforce, but do nothing in the
+   *  agent's name (no card, no approval used, no alert, no event, no inbox). */
+  private unauthenticated(agentId: string, event: string, p: HookPayload): unknown {
+    const now = Date.now();
+    if (now - (this.unauthLogged.get(agentId) ?? 0) > 10 * 60_000) {
+      this.unauthLogged.set(agentId, now);
+      this.hive.appendLog({ kind: 'hook-unauthenticated', agent_id: agentId, event } as Parameters<HiveManager['appendLog']>[0]);
+    }
+    if (event !== 'PreToolUse') return {};
+    try {
+      const policy = this.policyEngine();
+      if (!policy.active) return {};
+      const v = policy.evaluate({ hook_event_name: event, agent_id: agentId, tool_name: p.tool_name, tool_input: p.tool_input, cwd: p.cwd }, { grants: false });
+      if (v.decision === 'allow') return {};
+      return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: v.decision, permissionDecisionReason: `[policy:${v.ruleId}] ${v.reason ?? 'Denied by policy.'}` } };
+    } catch { return {}; }
   }
 
   /** Re-read guardrail.json after the Rules screen saved it: an explicit operator
@@ -582,6 +609,11 @@ If it says "Denied", do not push.`;
   private handle(p: HookPayload): unknown {
     const agentId = p.agent_id ?? undefined;
     const event = p.hook_event_name ?? 'Unknown';
+    // Finish plan item 5: a payload naming an agent must carry that agent's token.
+    // Without it, the decision only; nothing else happens in that agent's name.
+    if (this.hookAuth && agentId && !this.hookAuth.verify(agentId, (p as { hook_token?: unknown }).hook_token)) {
+      return this.unauthenticated(agentId, event, p);
+    }
     this.onEvent?.(agentId, event, p.message, p);
     if (agentId && typeof p.transcript_path === 'string' && p.transcript_path) {
       this.transcriptPaths.set(agentId, p.transcript_path);
