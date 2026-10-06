@@ -482,9 +482,13 @@ The approvable form is one Bash call: git [-C <dir>] push <remote> <40-char sha>
 
   /** What to tell an agent that tried another push form while one is waiting or
    *  approved for it, or null when it has none (then the rule asks as usual). */
-  private openApproval(agentId: string): string | null {
+  private openApproval(agentId: string, p: HookPayload): string | null {
     try {
-      const o = this.grantDesk()?.openFor(agentId);
+      const command = (p.tool_input as { command?: unknown } | undefined)?.command;
+      if (typeof command !== 'string') return null;
+      // Only toward the remote that was approved (finish plan item 4): a push to some
+      // other repo asks as it always did.
+      const o = this.grantDesk()?.openForPush(agentId, command, typeof p.cwd === 'string' ? p.cwd : null);
       if (!o) return null;
       this.hive.appendLog({ kind: 'grant-form-refused', agent_id: agentId, state: o.state, id: o.id } as Parameters<HiveManager['appendLog']>[0]);
       const where = o.cwd ? `in ${o.cwd}` : 'in the directory it was requested from';
@@ -774,7 +778,7 @@ If it says "Denied", do not push.`;
         // Another push form while this agent has a push waiting or approved: no grant can
         // cover it and an ask would open the prompt again, so refuse it and name the
         // exact approved command.
-        const open = v.notApprovable && agentId ? this.openApproval(agentId) : null;
+        const open = v.notApprovable && agentId ? this.openApproval(agentId, p) : null;
         if (v.decision !== 'allow') {
           const decision = open ? 'deny' : v.decision;
           if (decision === 'ask' && agentId && v.ruleId) this.policyAsks.set(agentId, { ruleId: v.ruleId, at: Date.now() });

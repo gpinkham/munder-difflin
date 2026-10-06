@@ -528,3 +528,21 @@ test('after an app restart, the approved push runs and another form still gets t
   assert.ok(other.hookSpecificOutput.permissionDecisionReason.includes(PUSH), 'the exact command, remembered across the restart');
   assert.equal(decisionOf(await h2(PUSH)), 'allow');
 });
+
+// --- Finish plan item 4: the other-form refusal is scoped to the same remote ----------
+
+test('another push form is refused only toward the approved remote; elsewhere it asks as usual', async (t) => {
+  const a = gitRepo(t);
+  const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'md-grant-other-'));
+  t.after(() => fs.rmSync(elsewhere, { recursive: true, force: true }));
+  execFileSync('git', ['init', '-q', elsewhere]);
+  execFileSync('git', ['-C', elsewhere, 'remote', 'add', 'origin', 'git@github.com:o/other.git']);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  await hook(f, PUSH, a);
+  const [p] = f.server.pendingGrants();
+  f.server.decideGrant(p.id, true);
+  assert.equal(decisionOf(await hook(f, 'git push -u origin other', elsewhere)), 'ask', 'a different repo and remote: the usual prompt');
+  assert.equal(decisionOf(await hook(f, 'git push', a)), 'deny', 'the approved remote: refused with the exact command');
+  assert.equal(decisionOf(await hook(f, `git -C ${a} push origin HEAD`, elsewhere)), 'deny', 'git -C points at the approved repo');
+  assert.equal(decisionOf(await hook(f, 'git push upstream main', a)), 'ask', 'a remote the repo does not have: no match, the usual prompt');
+});

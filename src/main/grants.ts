@@ -27,7 +27,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { effectiveCommands } from './shell';
 
@@ -325,16 +325,43 @@ export class GrantDesk {
     return { request, grant };
   }
 
+  /** openFor, limited to approvals for the remote this push command would send to.
+   *  Null when the command's target cannot be worked out: then nothing is refused. */
+  openForPush(agentId: string, command: string, cwd: string | null, now = Date.now()): ReturnType<GrantDesk['openFor']> {
+    const url = this.pushTargetUrl(command, cwd);
+    if (!url) return null;
+    return this.openFor(agentId, now, url);
+  }
+
+  /** Where `git [-C dir] push [flags] [remote] …` sends: the remote's push URL in that
+   *  repo (origin when no remote is named). Null for anything else, e.g. a compound
+   *  command, whose directory cannot be known. */
+  private pushTargetUrl(command: string, cwd: string | null): string | null {
+    const toks = command.trim().split(/\s+/);
+    if (toks[0] !== 'git') return null;
+    let dir = cwd;
+    let i = 1;
+    while (i < toks.length && toks[i] !== 'push') {
+      if (toks[i] === '-C' && toks[i + 1]) { dir = isAbsolute(toks[i + 1]) ? toks[i + 1] : join(dir ?? '', toks[i + 1]); i += 2; continue; }
+      if (toks[i].startsWith('-')) { i++; continue; }
+      return null;
+    }
+    if (toks[i] !== 'push' || !dir) return null;
+    if (toks.slice(i + 1).some((t) => /^(&&|\|\||;|\|)$/.test(t) || /[;&|]$/.test(t))) return null;
+    const remote = toks.slice(i + 1).find((t) => !t.startsWith('-')) ?? 'origin';
+    try { return this.inspect.pushUrl(dir, remote); } catch { return null; }
+  }
+
   /** The push this agent may run now (approved, and its grant still usable) or is
    *  waiting on, newest first. Main's own copy of the command, never the agent's.
    *  Approvals whose grant can no longer be used are pruned. */
-  openFor(agentId: string, now = Date.now()): { state: 'approved' | 'pending'; id: string; command: string; cwd: string | null } | null {
+  openFor(agentId: string, now = Date.now(), remoteUrl?: string): { state: 'approved' | 'pending'; id: string; command: string; cwd: string | null } | null {
     this.expire(now);
     const live = this.approved.filter((a) => this.store.findUsable(a.grant.agent_id, { class: a.grant.class, target: a.grant.target, summary: '' }, now));
     if (live.length !== this.approved.length) { this.approved = live; this.persist(); }
-    const a = [...live].reverse().find((x) => x.grant.agent_id === agentId);
+    const a = [...live].reverse().find((x) => x.grant.agent_id === agentId && (!remoteUrl || x.grant.target.remote_url === remoteUrl));
     if (a) return { state: 'approved', id: a.grant.id, command: a.command, cwd: a.cwd };
-    const q = [...this.pendingById.values()].reverse().find((r) => r.agent_id === agentId);
+    const q = [...this.pendingById.values()].reverse().find((r) => r.agent_id === agentId && (!remoteUrl || r.action.target.remote_url === remoteUrl));
     return q ? { state: 'pending', id: q.id, command: q.command, cwd: q.cwd } : null;
   }
 }
