@@ -165,7 +165,7 @@ export class HookServer {
    *  apart from one Claude raises on its own. Only a loaded policy ever sets it. */
   private policyAsks = new Map<string, { ruleId: string; at: number; cardId?: string }>();
   /** The approved push each agent was last allowed to run outside the sandbox. */
-  private approvedRuns = new Map<string, { command: string; at: number }>();
+  private approvedRuns = new Map<string, { command: string; cwd: string | null; at: number }>();
   /** The approval desk (HAG-49), built only when a loaded rule is grantable. */
   private desk: GrantDesk | null | undefined = undefined;
 
@@ -666,12 +666,17 @@ If it says "Denied", do not push.`;
     if (event === 'PermissionRequest' && agentId) {
       const run = this.approvedRuns.get(agentId);
       const input = p.tool_input as { command?: unknown; dangerouslyDisableSandbox?: unknown } | undefined;
-      if (run && Date.now() - run.at < APPROVED_RUN_WINDOW_MS && p.tool_name === 'Bash'
+      if (run && Date.now() - run.at < APPROVED_RUN_WINDOW_MS && p.tool_name === 'Bash' && (p.cwd ?? null) === run.cwd
         && input?.command === run.command && input?.dangerouslyDisableSandbox === true) {
         this.approvedRuns.delete(agentId);
         this.hive.appendLog({ kind: 'grant-sandbox-exit', agent_id: agentId } as Parameters<HiveManager['appendLog']>[0]);
         return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } };
       }
+    }
+    // The run is over, whether or not it asked (Dwight L1: bypass mode never does).
+    if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && p.tool_name === 'Bash'
+      && (p.tool_input as { command?: unknown } | undefined)?.command === this.approvedRuns.get(agentId)?.command) {
+      this.approvedRuns.delete(agentId);
     }
     this.onEvent?.(agentId, event, p.message, p);
     if (agentId && typeof p.transcript_path === 'string' && p.transcript_path) {
@@ -869,16 +874,20 @@ If it says "Denied", do not push.`;
           // check for the remote's host is a prompt of its own (third day-job report,
           // reproduced with Claude Code 2.1.291). So the approved push runs outside
           // the sandbox, and the one request to leave it is answered below.
+          // What leaves it is the push rebuilt from the grant, never the agent's text.
           const input = p.tool_input && typeof p.tool_input === 'object' ? p.tool_input as Record<string, unknown> : null;
-          const command = input && typeof input.command === 'string' ? input.command : null;
-          if (agentId && p.tool_name === 'Bash' && command) this.approvedRuns.set(agentId, { command, at: Date.now() });
+          let command: string | null = null;
+          if (agentId && p.tool_name === 'Bash' && typeof input?.command === 'string') {
+            try { command = this.grantDesk()?.approvedPushRun(agentId, v.grantId, input.command, typeof p.cwd === 'string' ? p.cwd : null) ?? null; } catch { command = null; }
+          }
+          if (agentId && command) this.approvedRuns.set(agentId, { command, cwd: p.cwd ?? null, at: Date.now() });
           this.emit(agentId, event, p);
           return {
             hookSpecificOutput: {
               hookEventName: 'PreToolUse',
               permissionDecision: 'allow',
               permissionDecisionReason: `[policy:${v.ruleId}] Approved by the operator (grant ${v.grantId}).`,
-              ...(command ? { updatedInput: { ...input, dangerouslyDisableSandbox: true } } : {})
+              ...(command ? { updatedInput: { ...input, command, dangerouslyDisableSandbox: true } } : {})
             }
           };
         }

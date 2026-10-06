@@ -379,6 +379,19 @@ export class GrantDesk {
     return this.openFor(agentId, now, url);
   }
 
+  /** The push a grant approved, rebuilt from the grant itself to run outside the
+   *  sandbox: never the agent's text, which a grant matches only by its target, so a
+   *  redirect or a second command would ride along (Dwight H1). Pushes straight to
+   *  the approved URL, from the repo the command names. Null when this agent holds no
+   *  such grant or the repo cannot be placed: then the push stays in the sandbox. */
+  approvedPushRun(agentId: string, grantId: string, command: string, cwd: string | null): string | null {
+    const a = this.approved.find((x) => x.grant.id === grantId && x.grant.agent_id === agentId);
+    const where = a ? this.remoteOf(command, cwd) : null;
+    if (!a || !where || !isAbsolute(where.dir)) return null;
+    const { remote_url, sha, ref } = a.grant.target;
+    return `git -C ${shq(where.dir)} push ${shq(remote_url)} ${shq(`${sha}:${ref}`)}`;
+  }
+
   /** Where `git [-C dir] push [flags] [remote] …` sends: the remote's push URL in that
    *  repo (origin when no remote is named). Null for anything else, e.g. a compound
    *  command, whose directory cannot be known. */
@@ -422,3 +435,7 @@ export class GrantDesk {
   }
 }
 
+/** One shell word, single-quoted: nothing inside it is expanded. */
+function shq(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}

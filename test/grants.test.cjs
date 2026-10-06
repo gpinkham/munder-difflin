@@ -398,20 +398,64 @@ test('on: the approved push runs outside the sandbox, and its one sandbox prompt
     tool_input: { command: PUSH, description: 'push' }, cwd: origin,
   });
   assert.equal(decisionOf(granted), 'allow');
-  assert.deepEqual(granted.hookSpecificOutput.updatedInput, { command: PUSH, description: 'push', dangerouslyDisableSandbox: true },
-    'the same input, run outside the sandbox');
-  assert.equal(behaviorOf(await permissionRequest(PUSH, { dangerouslyDisableSandbox: false })), 'none', 'only the request to leave the sandbox');
-  assert.equal(behaviorOf(await permissionRequest(`${PUSH} && echo x`)), 'none', 'only the exact approved command');
-  assert.equal(behaviorOf(await permissionRequest(PUSH, {}, 'pam-1')), 'none', 'only the agent the push was approved for');
-  const answered = await permissionRequest(PUSH);
+  // Dwight H1: what leaves the sandbox is the push rebuilt from the grant, never the
+  // agent's text, which the grant matches only by target (a redirect rides along).
+  const RUN = `git -C '${origin}' push '${URL}' '${SHA}:refs/heads/feat/x'`;
+  assert.deepEqual(granted.hookSpecificOutput.updatedInput, { command: RUN, description: 'push', dangerouslyDisableSandbox: true },
+    'the approved push, run outside the sandbox');
+  assert.equal(behaviorOf(await permissionRequest(PUSH)), 'none', 'only the rebuilt command, not the agent text');
+  assert.equal(behaviorOf(await permissionRequest(RUN, { dangerouslyDisableSandbox: false })), 'none', 'only the request to leave the sandbox');
+  assert.equal(behaviorOf(await permissionRequest(`${RUN} && echo x`)), 'none', 'only the exact approved command');
+  assert.equal(behaviorOf(await permissionRequest(RUN, {}, 'pam-1')), 'none', 'only the agent the push was approved for');
+  const elsewhere = await f.server.handle({ agent_id: 'jim-1', session_id: 's1', hook_event_name: 'PermissionRequest', tool_name: 'Bash',
+    tool_input: { command: RUN, dangerouslyDisableSandbox: true }, cwd: gitRepo(t) });
+  assert.equal(behaviorOf(elsewhere), 'none', 'Dwight L1: only from the directory it was approved in');
+  const answered = await permissionRequest(RUN);
   assert.deepEqual(answered, { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } });
-  assert.equal(behaviorOf(await permissionRequest(PUSH)), 'none', 'answered once');
+  assert.equal(behaviorOf(await permissionRequest(RUN)), 'none', 'answered once');
   // A request long after the run is not this run's: the user decides.
   await hook(f, PUSH, origin);
   const now = Date.now;
   Date.now = () => now() + 5 * 60_000;
-  try { assert.equal(behaviorOf(await permissionRequest(PUSH)), 'none', 'stale'); } finally { Date.now = now; }
+  try { assert.equal(behaviorOf(await permissionRequest(RUN)), 'none', 'stale'); } finally { Date.now = now; }
+  // Dwight L1: the run ending (no request came: bypass mode, or no sandbox) ends it.
+  await hook(f, PUSH, origin);
+  await f.server.handle({ agent_id: 'jim-1', session_id: 's1', hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: RUN, dangerouslyDisableSandbox: true }, cwd: origin });
+  assert.equal(behaviorOf(await permissionRequest(RUN)), 'none', 'cleared when the run ends');
   assert.match(f.log(), /"kind":"grant-sandbox-exit"[^\n]*"agent_id":"jim-1"/);
+});
+
+test('on: an approved push with a redirect or anything else added runs only as the approved push (Dwight H1)', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  await hook(f, PUSH, origin);
+  f.server.decideGrant(f.server.pendingGrants()[0].id, true);
+  const RUN = `git -C '${origin}' push '${URL}' '${SHA}:refs/heads/feat/x'`;
+  let rebuilt = 0;
+  for (const extra of [' > ~/.zshrc', ' >> x', ' &> x', ' >| x', ' > agents/jim-1/settings.json']) {
+    const out = await hook(f, PUSH + extra, origin);
+    // Safe outcomes: refused, run in the sandbox as written (no updatedInput), or the
+    // rebuilt push outside it. Never the agent's text outside it.
+    const u = decisionOf(out) === 'allow' ? out.hookSpecificOutput.updatedInput : undefined;
+    if (!u) continue;
+    assert.equal(u.command, RUN, `${extra}: the agent text never leaves the sandbox`);
+    rebuilt++;
+  }
+  assert.ok(rebuilt > 0, 'the redirect forms the grant matches are rebuilt, not refused');
+});
+
+test('on: a quote in the repo path or URL cannot break out of the rebuilt push', async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "md-grant-q'x-"));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  require('node:child_process').execFileSync('git', ['init', '-q', base]);
+  require('node:child_process').execFileSync('git', ['-C', base, 'remote', 'add', 'origin', URL]);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  await hook(f, PUSH, base);
+  f.server.decideGrant(f.server.pendingGrants()[0].id, true);
+  const out = await hook(f, PUSH, base);
+  const run = out.hookSpecificOutput.updatedInput.command;
+  const argv = JSON.parse(require('node:child_process').execFileSync('/bin/sh', ['-c', `node -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- ${run.slice(4)}`], { encoding: 'utf8' }));
+  assert.deepEqual(argv, ['-C', base, 'push', URL, `${SHA}:refs/heads/feat/x`]);
 });
 
 test('on: an approval-request sent first is the card; the push before Approve adds no second one', async (t) => {
