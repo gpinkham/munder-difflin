@@ -461,9 +461,10 @@ The approvable form is one Bash call: git [-C <dir>] push <remote> <40-char sha>
       const o = this.grantDesk()?.openFor(agentId);
       if (!o) return null;
       this.hive.appendLog({ kind: 'grant-form-refused', agent_id: agentId, state: o.state, id: o.id } as Parameters<HiveManager['appendLog']>[0]);
+      const where = o.cwd ? `in ${o.cwd}` : 'in the directory it was requested from';
       return o.state === 'approved'
-        ? `Not run: no approval covers this form. Your approved push (grant ${o.id}) is exactly this, as one Bash call, in the same directory: ${o.command}`
-        : `Not run: request ${o.id} is still waiting for the operator. End your turn; after "Approved", run exactly this, as one Bash call: ${o.command}`;
+        ? `Not run: no approval covers this push. Your approved push (grant ${o.id}) is exactly this, as one Bash call, ${where}: ${o.command}\nAny other push needs its own approval.`
+        : `Not run: request ${o.id} is still waiting for the operator. End your turn; after "Approved", run exactly this, as one Bash call, ${where}: ${o.command}`;
     } catch { return null; }
   }
 

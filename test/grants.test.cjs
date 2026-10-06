@@ -416,6 +416,24 @@ test('dry_run: a noted grant never becomes an explicit allow', async (t) => {
   const [p] = f.server.pendingGrants();
   f.server.decideGrant(p.id, true);
   assert.equal(decisionOf(await hook(f, PUSH, origin)), 'none', 'dry_run leaves the permission mode in charge');
+  assert.doesNotMatch(fs.readFileSync(f.grantsFile, 'utf8'), /"op":"use"/, 'and the grant is not spent');
+});
+
+// Dwight L1: the refusal names the directory the approved command belongs to, so a
+// push from another repo is not sent to run the wrong command in the wrong place.
+test('on: a refusal from another repo names the approved command and its directory', async (t) => {
+  const a = gitRepo(t);
+  const b = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  await hook(f, PUSH, a);
+  const [p] = f.server.pendingGrants();
+  f.server.decideGrant(p.id, true);
+  const out = await hook(f, 'git push -u origin other', b);
+  assert.equal(decisionOf(out), 'deny');
+  const why = out.hookSpecificOutput.permissionDecisionReason;
+  assert.ok(why.includes(PUSH));
+  assert.ok(why.includes(a), 'the approved directory, by path');
+  assert.doesNotMatch(why, /same directory/);
 });
 
 test('on: with nothing waiting or approved, another push form still asks', async (t) => {
