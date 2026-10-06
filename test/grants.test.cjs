@@ -19,7 +19,7 @@ require.cache[electron] = {
   exports: { Notification: class { show() {} static isSupported() { return false; } } }
 };
 
-const { canonicalAction, GrantStore, GrantDesk, GRANT_TTL_MS, GRANT_RETRY_MS } = loadTs('src/main/grants.ts');
+const { canonicalAction, runnablePush, GrantStore, GrantDesk, GRANT_TTL_MS, GRANT_RETRY_MS } = loadTs('src/main/grants.ts');
 const { PolicyEngine } = loadTs('src/main/policy.ts');
 const { HiveManager } = loadTs('src/main/hive.ts');
 const { HookServer } = loadTs('src/main/hooks.ts');
@@ -708,6 +708,32 @@ test('another push form is refused only toward the approved remote; elsewhere it
   assert.equal(decisionOf(await hook(f, 'git push', a)), 'deny', 'the approved remote: refused with the exact command');
   assert.equal(decisionOf(await hook(f, `git -C ${a} push origin HEAD`, elsewhere)), 'deny', 'git -C points at the approved repo');
   assert.equal(decisionOf(await hook(f, 'git push upstream main', a)), 'ask', 'a remote the repo does not have: no match, the usual prompt');
+});
+
+// Dwight on d73c8ec8: the runnable form quotes its repo. One parser must place it, or
+// the quoted form loses what the unquoted one gets.
+test('day job: the quoted runnable form, run from the inbox, leaves the sandbox like the plain one (Dwight M1)', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  f.drop({ ...REQUEST, cwd: origin });
+  f.server.decideGrant(f.server.pendingGrants()[0].id, true);
+  const inbox = path.join(f.home, 'hive', 'agents', 'jim-1', 'inbox');
+  const out = await hook(f, RUNNABLE(origin), inbox);
+  assert.equal(decisionOf(out), 'allow');
+  assert.equal(out.hookSpecificOutput.updatedInput?.command, `git -C '${origin}' push '${URL}' '${SHA}:refs/heads/feat/x'`);
+});
+
+test('the quoted runnable form is still flagged when its push URL differs from the fetch URL (Dwight L1)', (t) => {
+  const dir = repo(t, ['remote.origin.pushurl', 'https://evil.example/x.git']);
+  const r = new GrantDesk(store().s).request('jim', { command: runnablePush(PUSH, dir), cwd: '/somewhere/else' });
+  assert.equal(r.request.fetch_url, 'https://github.com/good/repo.git');
+});
+
+test('runnablePush keeps a relative -C relative to the directory it was meant from (Dwight nit)', () => {
+  assert.equal(runnablePush(`git -C sub push origin ${SHA}:refs/heads/x`, '/r'), `git -C '/r' -C sub push origin ${SHA}:refs/heads/x`);
+  assert.equal(runnablePush(`git -C /abs push origin ${SHA}:refs/heads/x`, '/r'), `git -C /abs push origin ${SHA}:refs/heads/x`);
+  const c = canonicalAction(runnablePush(`git -C sub push origin ${SHA}:refs/heads/x`, '/r'), '/elsewhere', { pushUrl: (d) => (d === '/r/sub' ? URL : null), pushRisk: () => null });
+  assert.ok(c.ok, c.why);
 });
 
 // --- Finish plan item 6: the card warns when the push goes somewhere else -------------

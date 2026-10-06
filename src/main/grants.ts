@@ -154,7 +154,8 @@ const no = (why: string) => ({ ok: false as const, why });
  */
 export function runnablePush(command: string, cwd: string | null | undefined): string {
   const c = command.trim();
-  if (!cwd || !/^git\s/.test(c) || /^git\s+-C\s/.test(c)) return c;
+  // A relative -C stays relative to cwd: git applies each -C in turn.
+  if (!cwd || !/^git\s/.test(c) || /^git\s+-C\s+\//.test(c)) return c;
   return `git -C ${shq(cwd)} ${c.slice(4).trimStart()}`;
 }
 
@@ -464,8 +465,13 @@ export class GrantDesk {
   private remoteOf(command: string, cwd: string | null): { dir: string; remote: string } | null {
     // Dwight L6: a second line, or a git dir chosen by flag, is a push this cannot
     // place; such a command is never refused here (it asks as usual).
-    if (/[\r\n]/.test(command.trim())) return null;
-    const toks = command.trim().split(/\s+/);
+    if (/[\r\n]/.test(command.trim()) || !/^git\s/.test(command.trim())) return null;
+    // Dwight on d73c8ec8: the same shell parser as canonicalAction, so a quoted
+    // `git -C '<repo>'` is placed where it goes, not at a path with quotes in it.
+    let cmds;
+    try { cmds = effectiveCommands(command, cwd ?? undefined); } catch { return null; }
+    if (cmds.length !== 1 || cmds[0].unresolved.length) return null;
+    const toks = cmds[0].argv;
     if (toks[0] !== 'git') return null;
     if (toks.some((t) => /^--(git-dir|work-tree)(=|$)/.test(t))) return null;
     let dir = cwd;
