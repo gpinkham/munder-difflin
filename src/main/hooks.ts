@@ -734,7 +734,7 @@ If it says "Denied", do not push.`;
           // without it, and the daemon's own cwd is not where the agent is standing.
           cwd: p.cwd
         });
-        if (v.grantId && v.decision === 'allow') {
+        if (v.grantId && v.decision === 'allow' && !v.wouldDeny) {
           // The operator's Approve IS the permission. Without an explicit allow an agent
           // that is not in bypassPermissions stops at Claude Code's own prompt for the
           // very push that was approved (day job, 2026-10-06).
