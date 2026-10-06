@@ -25,7 +25,7 @@
  * call, gh, curl, an alias — cannot be granted and keeps asking.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -174,6 +174,9 @@ export class GrantStore {
     return new GrantStore(join(policyDir, GRANTS_FILE));
   }
 
+  /** The folder the grants file lives in (the policy folder). */
+  get dir(): string { return dirname(this.path); }
+
   private rows(): Array<Record<string, unknown>> {
     if (!existsSync(this.path)) return [];
     let text: string;
@@ -234,10 +237,51 @@ export class GrantStore {
  * Pending requests live in memory only. The operator sees what THIS holds, never a
  * copy an agent could have edited.
  */
+/** The desk's own state beside grants.jsonl: what waits on a card, what was approved. */
+export const GRANT_DESK_FILE = 'grant-desk.json';
+
+interface DeskState {
+  pending: GrantRequest[];
+  approved: Array<{ grant: Grant; command: string; cwd: string | null }>;
+}
+
 export class GrantDesk {
   private pendingById = new Map<string, GrantRequest>();
+  /** Approved commands, in order, so a retry in another form can be told the exact one. */
+  private approved: DeskState['approved'] = [];
+  private statePath: string;
 
-  constructor(private store: GrantStore, private inspect: GitInspector = gitInspector) {}
+  /** Loads what was waiting or approved before a restart (finish plan item 3). A torn
+   *  file starts empty: nothing is approved by a file the desk cannot read. */
+  constructor(private store: GrantStore, private inspect: GitInspector = gitInspector) {
+    this.statePath = join(store.dir, GRANT_DESK_FILE);
+    try {
+      if (existsSync(this.statePath)) {
+        const st = JSON.parse(readFileSync(this.statePath, 'utf8')) as Partial<DeskState>;
+        for (const q of Array.isArray(st.pending) ? st.pending : []) if (q && typeof q.id === 'string') this.pendingById.set(q.id, q);
+        this.approved = (Array.isArray(st.approved) ? st.approved : []).filter((a) => a && a.grant && typeof a.command === 'string');
+      }
+    } catch { this.pendingById.clear(); this.approved = []; }
+  }
+
+  /** temp + rename, so a crash leaves the old state or the new, never half. */
+  private persist(): void {
+    try {
+      mkdirSync(dirname(this.statePath), { recursive: true });
+      const tmp = `${this.statePath}.tmp-${randomBytes(4).toString('hex')}`;
+      writeFileSync(tmp, JSON.stringify({ pending: [...this.pendingById.values()], approved: this.approved }, null, 2) + '\n');
+      renameSync(tmp, this.statePath);
+    } catch { /* the in-memory desk still works; a restart then forgets */ }
+  }
+
+  /** Drop requests that waited longer than a grant would live. */
+  private expire(now: number): void {
+    let changed = false;
+    for (const [id, q] of this.pendingById) {
+      if (!(now - Date.parse(q.requested_at) < GRANT_TTL_MS)) { this.pendingById.delete(id); changed = true; }
+    }
+    if (changed) this.persist();
+  }
 
   /** A new pending request, or the one already waiting for this agent's exact action
    *  (`fresh: false`): a retry before the operator decides raises no second card. */
@@ -247,6 +291,7 @@ export class GrantDesk {
     const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : null;
     const c = canonicalAction(input.command, cwd, this.inspect);
     if (!c.ok) return c;
+    this.expire(now);
     for (const q of this.pendingById.values()) {
       if (q.agent_id === agentId && q.action.class === c.action.class && sameTarget(q.action.target, c.action.target)) {
         return { ok: true, request: q, fresh: false };
@@ -258,35 +303,39 @@ export class GrantDesk {
       action: c.action, requested_at: new Date(now).toISOString(),
     };
     this.pendingById.set(request.id, request);
+    this.persist();
     return { ok: true, request, fresh: true };
   }
 
-  pending(): GrantRequest[] {
+  pending(now = Date.now()): GrantRequest[] {
+    this.expire(now);
     return [...this.pendingById.values()];
   }
 
-  /** The operator's decision. Returns the grant on Approve, null on Deny or an unknown id. */
+  /** The operator's decision. Returns the grant on Approve, null on Deny, an unknown id
+   *  or a request that expired. */
   decide(requestId: string, approve: boolean, now = Date.now()): { request: GrantRequest; grant: Grant | null } | null {
+    this.expire(now);
     const request = this.pendingById.get(requestId);
     if (!request) return null;
     this.pendingById.delete(requestId);
     const grant = approve ? this.store.mint(request, now) : null;
     if (grant) this.approved.push({ grant, command: request.command, cwd: request.cwd });
+    this.persist();
     return { request, grant };
   }
 
-  /** Approved commands, in order, so a retry in another form can be told the exact one. */
-  private approved: Array<{ grant: Grant; command: string; cwd: string | null }> = [];
-
   /** The push this agent may run now (approved, and its grant still usable) or is
-   *  waiting on, newest first. Main's own copy of the command, never the agent's. */
+   *  waiting on, newest first. Main's own copy of the command, never the agent's.
+   *  Approvals whose grant can no longer be used are pruned. */
   openFor(agentId: string, now = Date.now()): { state: 'approved' | 'pending'; id: string; command: string; cwd: string | null } | null {
-    for (const a of [...this.approved].reverse()) {
-      if (a.grant.agent_id !== agentId) continue;
-      const action = { class: a.grant.class, target: a.grant.target, summary: '' };
-      if (this.store.findUsable(agentId, action, now)) return { state: 'approved', id: a.grant.id, command: a.command, cwd: a.cwd };
-    }
+    this.expire(now);
+    const live = this.approved.filter((a) => this.store.findUsable(a.grant.agent_id, { class: a.grant.class, target: a.grant.target, summary: '' }, now));
+    if (live.length !== this.approved.length) { this.approved = live; this.persist(); }
+    const a = [...live].reverse().find((x) => x.grant.agent_id === agentId);
+    if (a) return { state: 'approved', id: a.grant.id, command: a.command, cwd: a.cwd };
     const q = [...this.pendingById.values()].reverse().find((r) => r.agent_id === agentId);
     return q ? { state: 'pending', id: q.id, command: q.command, cwd: q.cwd } : null;
   }
 }
+

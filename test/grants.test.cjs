@@ -473,3 +473,58 @@ test('the approval card shows the canonical target in full before the agent\'s w
   assert.equal(d.facts.find(([k]) => k === 'Commit')[1], SHA, 'the whole sha');
   assert.deepEqual(orderPending([{ requested_at: '2' }, { requested_at: '1' }]).map((x) => x.requested_at), ['1', '2']);
 });
+
+// --- Finish plan item 3: approvals survive an app restart ----------------------------
+
+test('a pending request and an approved command survive a restart (a new desk on the same folder)', () => {
+  const { dir, s } = store();
+  const t0 = Date.parse('2026-10-06T12:00:00Z');
+  const desk = new GrantDesk(s, resolver);
+  const r = desk.request('jim', { command: PUSH, cwd: '/r', reason: 'ship' }, t0);
+  const after = new GrantDesk(new GrantStore(path.join(dir, 'grants.jsonl')), resolver);
+  assert.deepEqual(after.pending(t0 + 1000).map((q) => q.id), [r.request.id], 'still on the card after a restart');
+  assert.equal(after.openFor('jim', t0 + 1000).state, 'pending');
+  const d = after.decide(r.request.id, true, t0 + 2000);
+  assert.ok(d.grant);
+  const third = new GrantDesk(new GrantStore(path.join(dir, 'grants.jsonl')), resolver);
+  const open = third.openFor('jim', t0 + 3000);
+  assert.deepEqual([open.state, open.command, open.cwd], ['approved', PUSH, '/r'], 'the approved command is remembered too');
+});
+
+test('a request waiting more than 60 minutes expires; spent approvals are pruned from the file', () => {
+  const { dir, s } = store();
+  const t0 = Date.parse('2026-10-06T12:00:00Z');
+  const desk = new GrantDesk(s, resolver);
+  const r = desk.request('jim', { command: PUSH, cwd: '/r' }, t0);
+  assert.equal(desk.pending(t0 + GRANT_TTL_MS + 1).length, 0, 'expired');
+  assert.equal(desk.decide(r.request.id, true, t0 + GRANT_TTL_MS + 1), null, 'an expired request cannot be approved');
+  const r2 = desk.request('jim', { command: PUSH, cwd: '/r' }, t0);
+  const { grant } = desk.decide(r2.request.id, true, t0 + 1000);
+  s.use(grant, t0 + 2000);
+  const state = () => JSON.parse(fs.readFileSync(path.join(dir, 'grant-desk.json'), 'utf8'));
+  assert.equal(state().approved.length, 1);
+  assert.equal(desk.openFor('jim', t0 + 2000 + GRANT_RETRY_MS + 1), null, 'spent: past the retry window');
+  assert.equal(state().approved.length, 0, 'and pruned from the file');
+});
+
+test('a torn desk file starts empty and says nothing is approved', () => {
+  const { dir, s } = store();
+  fs.writeFileSync(path.join(dir, 'grant-desk.json'), '{ torn');
+  const desk = new GrantDesk(s, resolver);
+  assert.deepEqual(desk.pending(), []);
+  assert.equal(desk.openFor('jim'), null);
+});
+
+test('after an app restart, the approved push runs and another form still gets the exact command', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  await hook(f, PUSH, origin);
+  const [p] = f.server.pendingGrants();
+  f.server.decideGrant(p.id, true);
+  const restarted = new HookServer(f.hive, () => null, () => ({}), undefined, undefined);
+  const h2 = (command) => restarted.handle({ agent_id: 'jim-1', session_id: 's2', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, cwd: origin });
+  const other = await h2('git push');
+  assert.equal(decisionOf(other), 'deny');
+  assert.ok(other.hookSpecificOutput.permissionDecisionReason.includes(PUSH), 'the exact command, remembered across the restart');
+  assert.equal(decisionOf(await h2(PUSH)), 'allow');
+});
