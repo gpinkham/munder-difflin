@@ -80,6 +80,9 @@ export interface GitInspector {
   pushUrl(dir: string, remote: string): string | null;
   /** Why one approved push could publish more than its ref, or null when it cannot. */
   pushRisk(dir: string): string | null;
+  /** True when `git push <url>` from this repo would send somewhere else: an
+   *  insteadOf or pushInsteadOf rule applies to a URL too. True when it cannot tell. */
+  rewritesUrl?(dir: string, url: string): boolean;
   /** Where the remote FETCHES from, to flag a push that goes elsewhere (item 6). */
   fetchUrl?(dir: string, remote: string): string | null;
 }
@@ -93,6 +96,21 @@ export const gitInspector: GitInspector = {
   // approved push somewhere else (Dwight, HAG-49 H1).
   pushUrl(dir, remote) {
     try { return git(dir, ['remote', 'get-url', '--push', remote]) || null; } catch { return null; }
+  },
+  rewritesUrl(dir, url) {
+    // Any rule whose prefix the URL starts with, at any config level. Broader than
+    // git's own choice of rule, so it can only keep a push in the sandbox, never let
+    // a rewritten one out.
+    let out: string;
+    try { out = git(dir, ['config', '-z', '--get-regexp', '^url\\..*\\.(pushinsteadof|insteadof)$']); } catch (e) {
+      if ((e as { status?: number }).status === 1) return false; // no such rules
+      return true;
+    }
+    return out.split('\0').some((entry) => {
+      const nl = entry.indexOf('\n');
+      const prefix = nl < 0 ? '' : entry.slice(nl + 1);
+      return prefix !== '' && url.startsWith(prefix);
+    });
   },
   fetchUrl(dir, remote) {
     try { return git(dir, ['remote', 'get-url', remote]) || null; } catch { return null; }
@@ -389,6 +407,13 @@ export class GrantDesk {
     const where = a ? this.remoteOf(command, cwd) : null;
     if (!a || !where || !isAbsolute(where.dir)) return null;
     const { remote_url, sha, ref } = a.grant.target;
+    // Dwight L3: a URL that reads as an option. M2: the URL is already past
+    // pushInsteadOf; pushed to by URL, git would rewrite it again, to where the card
+    // never said.
+    if (remote_url.startsWith('-')) return null;
+    let rewritten = true;
+    try { rewritten = this.inspect.rewritesUrl?.(where.dir, remote_url) ?? true; } catch { rewritten = true; }
+    if (rewritten) return null;
     return `git -C ${shq(where.dir)} push ${shq(remote_url)} ${shq(`${sha}:${ref}`)}`;
   }
 

@@ -444,6 +444,34 @@ test('on: an approved push with a redirect or anything else added runs only as t
   assert.ok(rebuilt > 0, 'the redirect forms the grant matches are rebuilt, not refused');
 });
 
+// Dwight M2: the grant pins the push URL after pushInsteadOf. Pushed to by URL, git
+// rewrites it again, so with two hops the rebuilt push would go where the card never
+// said. Such a push stays in the sandbox (allowed, as written). Real git, push -n.
+test('on: a push URL that git would rewrite again stays in the sandbox (Dwight M2)', async (t) => {
+  const origin = gitRepo(t);
+  const run = (...a) => require('node:child_process').execFileSync('git', ['-C', origin, ...a], { encoding: 'utf8' });
+  const Y = 'git@y.example:o/r.git', EVIL = 'git@evil.example:o/r.git';
+  run('remote', 'set-url', 'origin', Y);
+  run('config', `url.${URL}.pushInsteadOf`, Y);
+  run('config', `url.${EVIL}.pushInsteadOf`, URL);
+  assert.equal(run('remote', 'get-url', '--push', 'origin').trim(), URL, 'the card shows URL');
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  await hook(f, PUSH, origin);
+  f.server.decideGrant(f.server.pendingGrants()[0].id, true);
+  const out = await hook(f, PUSH, origin);
+  assert.equal(decisionOf(out), 'allow', 'still the approved push');
+  assert.equal(out.hookSpecificOutput.updatedInput, undefined, 'but not outside the sandbox');
+});
+
+test('on: a push URL that starts with a dash stays in the sandbox (Dwight L3)', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  const desk = f.server.grantDesk();
+  const grantId = 'g_test';
+  desk.approved = [{ grant: { id: grantId, class: 'git-push', agent_id: 'jim-1', target: { remote_url: '-oProxyCommand=x', ref: 'refs/heads/feat/x', sha: SHA }, minted_at: '', expires_at: '', request_id: 'r' }, command: PUSH, cwd: origin }];
+  assert.equal(desk.approvedPushRun('jim-1', grantId, PUSH, origin), null);
+});
+
 test('on: a quote in the repo path or URL cannot break out of the rebuilt push', async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "md-grant-q'x-"));
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
