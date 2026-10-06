@@ -12,7 +12,7 @@ tool call, which stops the agent if it does the thing anyway.
 | Backstop does | What happens |
 |---|---|
 | Block | The call is refused; the agent is told the rule's message. |
-| Ask me | The call stops for you. With "approve on a card", an exact `git push <remote> <sha>:refs/heads/<branch>` instead goes to the Approvals card in ASK ME, and runs after you click Approve. |
+| Ask me | The call stops for you. With "approve on a card", an exact `git [-C <repo>] push <remote> <sha>:refs/heads/<branch>` instead goes to the Approvals card in ASK ME, and runs after you click Approve. |
 | Log only | Nothing is stopped; the decision is recorded, to try a rule out. |
 
 A rule applies to all agents or to named ones (its backstop too). A rule without a
@@ -50,6 +50,11 @@ The status line at the top of Settings -> General and of the Rules screen says
   the repo cannot be placed.
 - Pushed by URL, the push does not update the agent's remote-tracking ref (and drops
   `-u`): `git status` can look behind until the next `git fetch`.
+- Every message names the push as one command with its repo, `git -C <repo> push …`,
+  because an agent's shell is usually not in the repo. `cd <repo> && git push …`
+  cannot be approved; when it is otherwise the approvable push it is refused with
+  that `git -C` command, never asked (an ask is a terminal prompt, in
+  bypassPermissions too).
 - Another form of the push to the same remote, while an approval is waiting or
   unused, is refused with the exact approved command. A push elsewhere asks as usual.
 - An approval works once (the identical retry within 10 minutes is allowed) and

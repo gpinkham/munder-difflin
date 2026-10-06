@@ -1576,7 +1576,7 @@ export class HiveManager {
       // HAG-49: only when the policy file makes a rule grantable. Said up front because
       // an interactive agent that just tries the push freezes on the native prompt.
       this.grantsActiveSafe()
-        ? 'Approvals: before a git push, request approval for that exact push. Write ONE outbox message {"act":"approval-request","command":"git push <remote> <40-char sha>:refs/heads/<branch>","cwd":"<repo dir>","reason":"<why>"} and wait for the reply; when it says approved, run exactly that command as one Bash call. A push in that form without approval is refused with a request id and put on the operator\'s Approvals card. End your turn and wait; after "Approved" run the same command again. Any other push stops at a prompt for the operator.'
+        ? 'Approvals: before a git push, request approval for that exact push. Write ONE outbox message {"act":"approval-request","command":"git -C <repo dir> push <remote> <40-char sha>:refs/heads/<branch>","cwd":"<repo dir>","reason":"<why>"} and wait for the reply; when it says approved, run exactly the command it gives as one Bash call, with no cd in front. A push in that form without approval is refused with a request id and put on the operator\'s Approvals card. End your turn and wait; after "Approved" run the same command again. Any other push stops at a prompt for the operator.'
         : '',
       memoryLine,
       knowledgeLine,

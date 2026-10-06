@@ -23,7 +23,7 @@ import { validateHookEvent } from '../shared/hookEvents';
 import { PolicyEngine, type AgentWorkspace, type PolicyPayload, type PolicyRule, type PolicyStatus } from './policy';
 import { ReportCheck, REPORT_CHECK_SENDER, type ReportMessage } from './reportCheck';
 import type { HookAuth } from './hookAuth';
-import { GrantDesk, GrantStore, type GrantRequest } from './grants';
+import { GrantDesk, GrantStore, runnablePush, type GrantRequest } from './grants';
 import { WORKER_WAKE_ANSWERED_EVENTS } from './workerWake';
 
 /** The sender name on the approval desk's messages. */
@@ -535,7 +535,7 @@ The approvable form is one Bash call: git [-C <dir>] push <remote> <40-char sha>
     if (r.fresh) this.announceRequest(agentId, q, 'outbox');
     this.hive.send({
       to: agentId, act: 'inform', subject: `Approval requested: ${q.action.summary}`,
-      body: `Request ${q.id} is waiting for the operator. Do not run the push until a message says it is approved; then run exactly the command you sent, as one Bash call, within 60 minutes.`,
+      body: `Request ${q.id} is waiting for the operator. Do not run the push until a message says it is approved; then run exactly this, as one Bash call, within 60 minutes (no cd in front: it names its repo):\n${runnablePush(q.command, q.cwd)}`,
     }, GRANT_DESK_SENDER);
     return true;
   }
@@ -551,10 +551,21 @@ The approvable form is one Bash call: git [-C <dir>] push <remote> <40-char sha>
       const o = this.grantDesk()?.openForPush(agentId, command, typeof p.cwd === 'string' ? p.cwd : null);
       if (!o) return null;
       this.hive.appendLog({ kind: 'grant-form-refused', agent_id: agentId, state: o.state, id: o.id } as Parameters<HiveManager['appendLog']>[0]);
-      const where = o.cwd ? `in ${o.cwd}` : 'in the directory it was requested from';
+      const run = runnablePush(o.command, o.cwd);
       return o.state === 'approved'
-        ? `Not run: no approval covers this push. Your approved push (grant ${o.id}) is exactly this, as one Bash call, ${where}: ${o.command}\nAny other push needs its own approval.`
-        : `Not run: request ${o.id} is still waiting for the operator. End your turn; after "Approved", run exactly this, as one Bash call, ${where}: ${o.command}`;
+        ? `Not run: no approval covers this push. Your approved push (grant ${o.id}) is exactly this, as one Bash call, with no cd in front: ${run}\nAny other push needs its own approval.`
+        : `Not run: request ${o.id} is still waiting for the operator. End your turn; after "Approved", run exactly this, as one Bash call, with no cd in front: ${run}`;
+    } catch { return null; }
+  }
+
+  /** `cd <repo> && <approvable push>`: no grant covers that form and an ask would open
+   *  the terminal prompt (day job, 2026-10-06), so refuse it with the one runnable
+   *  command that can go on the card. Null for anything else. */
+  private cdFormRefusal(p: HookPayload): string | null {
+    try {
+      const command = (p.tool_input as { command?: unknown } | undefined)?.command;
+      const run = typeof command === 'string' ? this.grantDesk()?.cdFormRunnable(command) ?? null : null;
+      return run ? `Not run: a push with cd in front cannot be approved. Run it as one git command that names its repo: ${run}` : null;
     } catch { return null; }
   }
 
@@ -598,7 +609,7 @@ The approvable form is one Bash call: git [-C <dir>] push <remote> <40-char sha>
       if (r && !r.ok && 'denied' in r && r.denied) return `Not run: ${r.why}.`;
       if (r?.ok) {
         if (r.fresh) this.announceRequest(agentId, r.request, 'hook');
-        return `Not run: this push needs the operator's approval. Request ${r.request.id} is on the Approvals card in ASK ME. End your turn and wait. When a message says "Approved", run exactly this, as one Bash call, in the same directory: ${r.request.command}
+        return `Not run: this push needs the operator's approval. Request ${r.request.id} is on the Approvals card in ASK ME. End your turn and wait. When a message says "Approved", run exactly this, as one Bash call, with no cd in front: ${runnablePush(r.request.command, r.request.cwd)}
 If it says "Denied", do not push.`;
       }
     } catch { /* never break a hook */ }
@@ -623,7 +634,7 @@ If it says "Denied", do not push.`;
     this.hive.send(grant
       ? {
         to: q.agent_id, act: 'agree', subject: `Approved: ${q.action.summary}`,
-        body: `Grant ${grant.id}. Run exactly this, as one Bash call, before ${grant.expires_at}:\n${q.command}\nIt works once; the identical command may be retried within 10 minutes of the first run. Any other form of the push is refused; any other push needs its own approval.`,
+        body: `Grant ${grant.id}. Run exactly this, as one Bash call, with no cd in front, before ${grant.expires_at}:\n${runnablePush(q.command, q.cwd)}\nIt works once; the identical command may be retried within 10 minutes of the first run. Any other form of the push is refused; any other push needs its own approval.`,
       }
       : {
         to: q.agent_id, act: 'refuse', subject: `Denied: ${q.action.summary}`,
@@ -894,7 +905,7 @@ If it says "Denied", do not push.`;
         // Another push form while this agent has a push waiting or approved: no grant can
         // cover it and an ask would open the prompt again, so refuse it and name the
         // exact approved command.
-        const open = v.notApprovable && agentId ? this.openApproval(agentId, p) : null;
+        const open = v.notApprovable && agentId ? (this.openApproval(agentId, p) ?? this.cdFormRefusal(p)) : null;
         if (v.decision !== 'allow') {
           const decision = open ? 'deny' : v.decision;
           if (decision === 'ask' && agentId && v.ruleId) this.policyAsks.set(agentId, { ruleId: v.ruleId, at: Date.now() });

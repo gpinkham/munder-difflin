@@ -360,7 +360,7 @@ test('on: a push with no grant is denied, raises its own Approvals card once, an
   const why = out.hookSpecificOutput.permissionDecisionReason;
   assert.match(why, new RegExp(p.id), 'the agent is told which request');
   assert.match(why, /Approved/);
-  assert.ok(why.includes(PUSH), 'the exact command to run after Approve');
+  assert.ok(why.includes(RUNNABLE(origin)), 'the exact command to run after Approve');
   assert.equal(f.server.awaitingPolicyAnswer('jim-1'), false, 'no prompt, so no prompt hold and no prompt card');
   assert.ok(f.inbox('god-1').some((m) => /waiting on the operator/.test(m.subject)));
   assert.equal(decisionOf(await hook(f, PUSH, origin)), 'deny', 'a retry before Approve');
@@ -499,6 +499,45 @@ test('on: a quote in the repo path or URL cannot break out of the rebuilt push',
   assert.deepEqual(argv, ['-C', base, 'push', URL, `${SHA}:refs/heads/feat/x`]);
 });
 
+// Day job 2026-10-06 (Gary's decision rows): the agent's shell is in its inbox, not the
+// repo. The grant message said only `git push origin <sha>:<ref>`, so the agent ran
+// `cd <repo> && git push …`, a form no grant covers, and the rule asked: the terminal
+// prompt, after Approve, in bypassPermissions too. Every message now names the repo
+// with -C, and the cd form is refused with that command instead of asking.
+const RUNNABLE = (dir) => `git -C '${dir}' push origin ${SHA}:refs/heads/feat/x`;
+test('day job: the command the approval names runs from any shell directory and is allowed', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  assert.match(f.prompt, /"command":"git -C <repo dir> push /, 'agents are told to name the repo in the command');
+  f.drop({ ...REQUEST, cwd: origin });
+  assert.ok(f.inbox('jim-1').some((m) => m.body.includes(RUNNABLE(origin))), 'the waiting message names the runnable command');
+  f.server.decideGrant(f.server.pendingGrants()[0].id, true);
+  const agree = f.inbox('jim-1').find((m) => m.act === 'agree');
+  assert.ok(agree.body.includes(RUNNABLE(origin)), 'the grant message names the repo with -C');
+  const inbox = path.join(f.home, 'hive', 'agents', 'jim-1', 'inbox');
+  assert.equal(decisionOf(await hook(f, RUNNABLE(origin), inbox)), 'allow', 'run from the inbox, it is the approved push');
+});
+
+test('day job: `cd <repo> && git push …` is refused with the runnable command, never asked', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  const inbox = path.join(f.home, 'hive', 'agents', 'jim-1', 'inbox');
+  const CD = `cd ${origin} && ${PUSH}`;
+  const before = await hook(f, CD, inbox);
+  assert.equal(decisionOf(before), 'deny', 'no approval yet: refused, not a terminal prompt');
+  assert.ok(before.hookSpecificOutput.permissionDecisionReason.includes(RUNNABLE(origin)), 'names the form to run instead');
+  f.drop({ ...REQUEST, cwd: origin });
+  f.server.decideGrant(f.server.pendingGrants()[0].id, true);
+  const after = await hook(f, CD, inbox);
+  assert.equal(decisionOf(after), 'deny', 'approved: the exact day-job retry is refused, not asked');
+  assert.ok(after.hookSpecificOutput.permissionDecisionReason.includes(RUNNABLE(origin)), 'and told the approved command');
+  assert.equal(decisionOf(await hook(f, RUNNABLE(origin), inbox)), 'allow', 'the grant was not spent by the refusals');
+  // Not this shape: unchanged, it asks as before.
+  for (const other of [`cd ${origin}; ${PUSH}`, `cd $D && ${PUSH}`, `cd ${origin} && ${PUSH} && echo x`, `cd ${origin} && GIT_DIR=x ${PUSH}`]) {
+    assert.equal(decisionOf(await hook(f, other, inbox)), 'ask', other);
+  }
+});
+
 test('on: an approval-request sent first is the card; the push before Approve adds no second one', async (t) => {
   const origin = gitRepo(t);
   const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
@@ -522,12 +561,12 @@ test('on: another push form while a request waits or a grant is open is refused 
   const waiting = await hook(f, 'git push', origin);
   assert.equal(decisionOf(waiting), 'deny', 'pending: no prompt');
   assert.match(waiting.hookSpecificOutput.permissionDecisionReason, new RegExp(p.id));
-  assert.ok(waiting.hookSpecificOutput.permissionDecisionReason.includes(PUSH));
+  assert.ok(waiting.hookSpecificOutput.permissionDecisionReason.includes(RUNNABLE(origin)));
   f.server.decideGrant(p.id, true);
   for (const other of ['git push', 'git push origin feat/x', `git push origin HEAD:refs/heads/feat/x`]) {
     const out = await hook(f, other, origin);
     assert.equal(decisionOf(out), 'deny', other);
-    assert.ok(out.hookSpecificOutput.permissionDecisionReason.includes(PUSH), `${other}: names the approved command`);
+    assert.ok(out.hookSpecificOutput.permissionDecisionReason.includes(RUNNABLE(origin)), `${other}: names the approved command`);
   }
   assert.equal(f.server.awaitingPolicyAnswer('jim-1'), false, 'no prompt was opened');
   assert.match(f.log(), /"kind":"grant-form-refused"[^\n]*"state":"approved"/);
@@ -557,7 +596,7 @@ test('on: a refusal from another repo names the approved command and its directo
   const out = await hook(f, 'git push -u origin other', b);
   assert.equal(decisionOf(out), 'deny');
   const why = out.hookSpecificOutput.permissionDecisionReason;
-  assert.ok(why.includes(PUSH));
+  assert.ok(why.includes(RUNNABLE(a)));
   assert.ok(why.includes(a), 'the approved directory, by path');
   assert.doesNotMatch(why, /same directory/);
 });
@@ -649,7 +688,7 @@ test('after an app restart, the approved push runs and another form still gets t
   const h2 = (command) => restarted.handle({ agent_id: 'jim-1', session_id: 's2', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, cwd: origin });
   const other = await h2('git push');
   assert.equal(decisionOf(other), 'deny');
-  assert.ok(other.hookSpecificOutput.permissionDecisionReason.includes(PUSH), 'the exact command, remembered across the restart');
+  assert.ok(other.hookSpecificOutput.permissionDecisionReason.includes(RUNNABLE(origin)), 'the exact command, remembered across the restart');
   assert.equal(decisionOf(await h2(PUSH)), 'allow');
 });
 

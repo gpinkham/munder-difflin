@@ -148,6 +148,24 @@ const ok = (a: CanonicalAction) => ({ ok: true as const, action: a });
 const no = (why: string) => ({ ok: false as const, why });
 
 /**
+ * The approvable push as one Bash call that names its repo: `git -C <dir> push …`.
+ * An agent's shell is usually not in the repo (day job, 2026-10-06), so a command
+ * given without its directory gets a `cd <repo> &&` in front, which no grant covers.
+ */
+export function runnablePush(command: string, cwd: string | null | undefined): string {
+  const c = command.trim();
+  if (!cwd || !/^git\s/.test(c) || /^git\s+-C\s/.test(c)) return c;
+  return `git -C ${shq(cwd)} ${c.slice(4).trimStart()}`;
+}
+
+/** `cd <absolute dir> && git …`, exactly that shape: the dir and the git command. Only
+ *  ever used to refuse it with the runnable form, never to approve it. */
+export function cdPush(command: string): { dir: string; push: string } | null {
+  const m = /^cd\s+(\/[A-Za-z0-9._/@+,=-]*)\s+&&\s+(git\s[^\r\n]*)$/.exec(command.trim());
+  return m ? { dir: m[1], push: m[2].trim() } : null;
+}
+
+/**
  * The canonical action a Bash command performs, or the reason it cannot be granted.
  * `cwd` is where the agent's shell is; a `-C <dir>` in the command overrides it.
  */
@@ -422,6 +440,15 @@ export class GrantDesk {
     try { rewritten = this.inspect.rewritesUrl?.(where.dir, remote_url) ?? true; } catch { rewritten = true; }
     if (rewritten) return null;
     return `git -C ${shq(where.dir)} push ${shq(remote_url)} ${shq(`${sha}:${ref}`)}`;
+  }
+
+  /** For `cd <repo> && <approvable push>`: the same push as one runnable git command,
+   *  to refuse the cd form with. Null for anything else. */
+  cdFormRunnable(command: string): string | null {
+    const cd = cdPush(command);
+    if (!cd) return null;
+    const c = canonicalAction(cd.push, cd.dir, this.inspect);
+    return c.ok ? runnablePush(cd.push, cd.dir) : null;
   }
 
   /** Where `git [-C dir] push [flags] [remote] …` sends: the remote's push URL in that
