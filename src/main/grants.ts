@@ -70,6 +70,8 @@ export interface GrantRequest {
   reason: string;
   action: CanonicalAction;
   requested_at: string;
+  /** Set when the remote fetches from a different URL than this push goes to. */
+  fetch_url?: string;
 }
 
 /** What the grant check needs to know about the repo a push runs in. */
@@ -78,6 +80,8 @@ export interface GitInspector {
   pushUrl(dir: string, remote: string): string | null;
   /** Why one approved push could publish more than its ref, or null when it cannot. */
   pushRisk(dir: string): string | null;
+  /** Where the remote FETCHES from, to flag a push that goes elsewhere (item 6). */
+  fetchUrl?(dir: string, remote: string): string | null;
 }
 
 const git = (dir: string, args: string[]) =>
@@ -89,6 +93,9 @@ export const gitInspector: GitInspector = {
   // approved push somewhere else (Dwight, HAG-49 H1).
   pushUrl(dir, remote) {
     try { return git(dir, ['remote', 'get-url', '--push', remote]) || null; } catch { return null; }
+  },
+  fetchUrl(dir, remote) {
+    try { return git(dir, ['remote', 'get-url', remote]) || null; } catch { return null; }
   },
   pushRisk(dir) {
     const get = (key: string): string | null => {
@@ -297,10 +304,16 @@ export class GrantDesk {
         return { ok: true, request: q, fresh: false };
       }
     }
+    // Item 6: a remote whose push URL is not its fetch URL (pushurl, pushInsteadOf)
+    // sends this push somewhere the operator may not expect. Flag it on the card.
+    const where = this.remoteOf(input.command, cwd);
+    let fetchUrl: string | null = null;
+    try { fetchUrl = where && this.inspect.fetchUrl ? this.inspect.fetchUrl(where.dir, where.remote) : null; } catch { fetchUrl = null; }
     const request: GrantRequest = {
       id: newId('r'), agent_id: agentId, command: input.command, cwd,
       reason: typeof input.reason === 'string' ? input.reason.slice(0, 500) : '',
       action: c.action, requested_at: new Date(now).toISOString(),
+      ...(fetchUrl && fetchUrl !== c.action.target.remote_url ? { fetch_url: fetchUrl } : {}),
     };
     this.pendingById.set(request.id, request);
     this.persist();
@@ -337,6 +350,13 @@ export class GrantDesk {
    *  repo (origin when no remote is named). Null for anything else, e.g. a compound
    *  command, whose directory cannot be known. */
   private pushTargetUrl(command: string, cwd: string | null): string | null {
+    const where = this.remoteOf(command, cwd);
+    if (!where) return null;
+    try { return this.inspect.pushUrl(where.dir, where.remote); } catch { return null; }
+  }
+
+  /** The repo and remote of `git [-C dir] push [flags] [remote] …`, or null. */
+  private remoteOf(command: string, cwd: string | null): { dir: string; remote: string } | null {
     const toks = command.trim().split(/\s+/);
     if (toks[0] !== 'git') return null;
     let dir = cwd;
@@ -348,8 +368,7 @@ export class GrantDesk {
     }
     if (toks[i] !== 'push' || !dir) return null;
     if (toks.slice(i + 1).some((t) => /^(&&|\|\||;|\|)$/.test(t) || /[;&|]$/.test(t))) return null;
-    const remote = toks.slice(i + 1).find((t) => !t.startsWith('-')) ?? 'origin';
-    try { return this.inspect.pushUrl(dir, remote); } catch { return null; }
+    return { dir, remote: toks.slice(i + 1).find((t) => !t.startsWith('-')) ?? 'origin' };
   }
 
   /** The push this agent may run now (approved, and its grant still usable) or is

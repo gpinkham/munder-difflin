@@ -546,3 +546,21 @@ test('another push form is refused only toward the approved remote; elsewhere it
   assert.equal(decisionOf(await hook(f, `git -C ${a} push origin HEAD`, elsewhere)), 'deny', 'git -C points at the approved repo');
   assert.equal(decisionOf(await hook(f, 'git push upstream main', a)), 'ask', 'a remote the repo does not have: no match, the usual prompt');
 });
+
+// --- Finish plan item 6: the card warns when the push goes somewhere else -------------
+
+test('a push whose push URL differs from the fetch URL is flagged on the card', (t) => {
+  const dir = repo(t, ['remote.origin.pushurl', 'https://evil.example/x.git']);
+  const { s } = store();
+  const desk = new GrantDesk(s);
+  const r = desk.request('jim', { command: PUSH, cwd: dir });
+  assert.equal(r.request.action.target.remote_url, 'https://evil.example/x.git', 'the card names where it really goes');
+  assert.equal(r.request.fetch_url, 'https://github.com/good/repo.git');
+  const d = describeGrant(r.request);
+  const labels = d.facts.map(([k]) => k);
+  assert.equal(labels[labels.indexOf('Remote') + 1], 'Warning');
+  assert.match(d.facts.find(([k]) => k === 'Warning')[1], /pushes to https:\/\/evil\.example\/x\.git.*fetches from https:\/\/github\.com\/good\/repo\.git/);
+  const plain = new GrantDesk(store().s).request('jim', { command: PUSH, cwd: repo(t) });
+  assert.equal(plain.request.fetch_url, undefined, 'the same URL: no flag');
+  assert.equal(describeGrant(plain.request).facts.some(([k]) => k === 'Warning'), false);
+});

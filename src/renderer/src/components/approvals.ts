@@ -17,6 +17,8 @@ export interface PendingGrantView {
   reason: string;
   requested_at: string;
   action: { class: string; summary: string; target: { remote_url: string; ref: string; sha: string } };
+  /** Set when the remote fetches from a different URL than this push goes to. */
+  fetch_url?: string;
 }
 
 export interface ApprovalLines {
@@ -33,6 +35,7 @@ export function describeGrant(g: PendingGrantView): ApprovalLines {
       ['Branch', t.ref.replace(/^refs\/heads\//, '')],
       ['Commit', t.sha],
       ['Remote', t.remote_url],
+      ...(g.fetch_url ? [['Warning', `this pushes to ${t.remote_url}, but the remote fetches from ${g.fetch_url}`] as [string, string]] : []),
       ['Valid', 'once, for 60 minutes after you approve'],
       ['Command', g.command],
       ...(g.reason ? [['Reason', g.reason] as [string, string]] : []),

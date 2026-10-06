@@ -68,7 +68,7 @@ export function ApprovalsPanel({ onCount }: { onCount?: (n: number) => void }) {
               {d.facts.map(([k, v]) => (
                 <div key={k} style={{ display: 'contents' }}>
                   <span style={{ color: 'var(--cth-ink-500)' }}>{k}</span>
-                  <span style={{ color: 'var(--cth-ink-900)', overflowWrap: 'anywhere' }}>{v}</span>
+                  <span style={{ color: k === 'Warning' ? 'var(--cth-coral, #c0392b)' : 'var(--cth-ink-900)', fontWeight: k === 'Warning' ? 600 : undefined, overflowWrap: 'anywhere' }}>{v}</span>
                 </div>
               ))}
             </div>
