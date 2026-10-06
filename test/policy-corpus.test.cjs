@@ -159,6 +159,8 @@ test('md-136: the record keeps what training needs', () => {
     digest: 'sha256:abc',
   });
   assert.equal(rec.schema, CORPUS_SCHEMA);
+  assert.ok(CORPUS_SCHEMA >= 4, 'approval_needed rows must be tellable apart from older denies');
+  assert.equal(rec.approval_needed, false);
   assert.equal(rec.rule_id, 'cross-agent-workspace');
   assert.equal(rec.decision, 'deny');
   assert.equal(rec.mode, 'dry_run');

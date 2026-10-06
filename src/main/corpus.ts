@@ -41,8 +41,10 @@
  *  predate that and record it as `<arg>`, so they are not comparable on it.
  *  3 — `granted` (HAG-49): an ask rule's action allowed by an operator's one-action
  *  grant. Without it that row reads as an ordinary allow. The grant's id is a value
- *  and is never written; only the fact that one was used. */
-export const CORPUS_SCHEMA = 3;
+ *  and is never written; only the fact that one was used.
+ *  4 — `approval_needed`: an approvable push with no grant is denied (and put on the
+ *  Approvals card) instead of asked. Without it that row reads as an ordinary deny. */
+export const CORPUS_SCHEMA = 4;
 
 /** Local-only, and beside the policy it describes: `<hive>/policy/`. That directory is
  *  already the one place agents may not write (policy self-protection), and keeping the
@@ -292,6 +294,8 @@ export interface CorpusInput {
     wouldDeny?: boolean;
     /** True when an operator's grant allowed an ask rule's action (HAG-49). */
     granted?: boolean;
+    /** True when the deny only waits on the operator's Approve (schema 4). */
+    approvalNeeded?: boolean;
   };
   /** Already parsed by shell.ts for the decision itself, so this costs no re-parse. */
   commands?: Array<{ argv: string[]; writes: string[]; removes: string[]; unresolved?: Array<{ code: string }> }>;
@@ -332,6 +336,7 @@ export function corpusRecord(input: CorpusInput): Record<string, unknown> {
     mode: verdict.mode ?? null,
     would_deny: verdict.wouldDeny ?? false,
     granted: verdict.granted === true,
+    approval_needed: verdict.approvalNeeded === true,
     matched_on: verdict.matchedOn ?? null,
     tool: payload.tool_name ?? null,
     agent: agentLabel(payload.agent_id, ctx) ?? '<agent:unknown>',

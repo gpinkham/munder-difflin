@@ -449,18 +449,44 @@ The approvable form is one Bash call: git [-C <dir>] push <remote> <40-char sha>
       return true;
     }
     const q = r.request;
-    log({ kind: 'grant-requested', request_id: q.id, agent_id: agentId, class: q.action.class, target: q.action.target });
+    if (r.fresh) this.announceRequest(agentId, q, 'outbox');
     this.hive.send({
       to: agentId, act: 'inform', subject: `Approval requested: ${q.action.summary}`,
       body: `Request ${q.id} is waiting for the operator. Do not run the push until a message says it is approved; then run exactly the command you sent, as one Bash call, within 60 minutes.`,
     }, GRANT_DESK_SENDER);
+    return true;
+  }
+
+  /** A new request is on the Approvals card: log it, tell god, alert the operator. */
+  private announceRequest(agentId: string, q: GrantRequest, via: 'outbox' | 'hook'): void {
+    this.hive.appendLog({
+      kind: 'grant-requested', request_id: q.id, agent_id: agentId, class: q.action.class, target: q.action.target, via,
+    } as Parameters<HiveManager['appendLog']>[0]);
     this.hive.send({
       to: 'god', act: 'inform', subject: `${agentId} is waiting on the operator: ${q.action.summary}`,
       body: `The operator approves or denies it under Approvals in the ASK ME tab. ${agentId} will wait; nothing to relay.`,
     }, GRANT_DESK_SENDER);
     this.notify(agentId, `Approval needed: ${q.action.summary}`);
     this.getWebContents()?.send('policy:grantsChanged');
-    return true;
+  }
+
+  /**
+   * The engine denied an approvable push that has no grant (rather than ask: a grant
+   * is used on a LATER call, so Approve could never answer a terminal prompt that is
+   * already open). Put the push on the Approvals card, once, and tell the agent how to
+   * finish. The deny itself never depends on this succeeding.
+   */
+  private approvalNeeded(agentId: string, p: HookPayload): string {
+    try {
+      const input = (p.tool_input ?? {}) as Record<string, unknown>;
+      const desk = this.grantDesk();
+      const r = desk?.request(agentId, { command: input.command, cwd: p.cwd, reason: 'Raised by the push itself.' });
+      if (r?.ok) {
+        if (r.fresh) this.announceRequest(agentId, r.request, 'hook');
+        return `Not run: this push needs the operator's approval. Request ${r.request.id} is on the Approvals card in ASK ME. End your turn and wait. When a message says "Approved", run exactly the same command again as one Bash call; if it says "Denied", do not push.`;
+      }
+    } catch { /* never break a hook */ }
+    return 'Not run: this push needs the operator\'s approval. Send an approval-request outbox message for exactly this command, end your turn, and run it again only after a message says "Approved".';
   }
 
   /** What the operator sees: main's own copy of each pending request. */
@@ -696,12 +722,13 @@ The approvable form is one Bash call: git [-C <dir>] push <remote> <40-char sha>
         });
         if (v.decision !== 'allow') {
           if (v.decision === 'ask' && agentId && v.ruleId) this.policyAsks.set(agentId, { ruleId: v.ruleId, at: Date.now() });
+          const why = `[policy:${v.ruleId}] ${v.reason ?? 'Denied by policy.'}`;
           this.emit(agentId, event, p);
           return {
             hookSpecificOutput: {
               hookEventName: 'PreToolUse',
               permissionDecision: v.decision,
-              permissionDecisionReason: `[policy:${v.ruleId}] ${v.reason ?? 'Denied by policy.'}`
+              permissionDecisionReason: v.approvalNeeded && agentId ? `${why} ${this.approvalNeeded(agentId, p)}` : why
             }
           };
         }
