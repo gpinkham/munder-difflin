@@ -167,3 +167,37 @@ test('L7: a forged payload leaves no decision row under the agent it names', asy
   assert.doesNotMatch(f.log(), /"kind":"policy-decision"[^\n]*"agent_id":"jim-1"/);
   assert.match(f.log(), /"kind":"hook-unauthenticated"[^\n]*"decision":"deny"/, 'the refusal is still on record, as unauthenticated');
 });
+
+// Dwight M5 (side effect of M4): a SubagentStop now arrives as the parent agent. It is
+// not the parent's Stop: no "finished - idle" notice, no idle status.
+test('M5: a subagent finishing is not its agent finishing (server and renderer)', async (t) => {
+  const f = await floor(t);
+  const notified = [];
+  f.server.notify = (agentId, msg) => notified.push([agentId, msg]);
+  await f.server.handle({ agent_id: 'jim-1', subagent_id: 'sub-1', hook_token: f.auth.token('jim-1'), session_id: 's', hook_event_name: 'SubagentStop' });
+  assert.deepEqual(notified, [], 'no idle notice');
+  assert.ok(f.events.some(([a, e]) => a === 'jim-1' && e === 'SubagentStop'), 'still reported, as activity');
+  await f.server.handle({ agent_id: 'jim-1', hook_token: f.auth.token('jim-1'), session_id: 's', hook_event_name: 'Stop' });
+  assert.deepEqual(notified, [['jim-1', 'finished — idle']], 'the agent\'s own Stop still is');
+  const hive = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/src/hooks/useHive.ts'), 'utf8');
+  assert.doesNotMatch(hive, /e\.event === 'Stop' \|\| e\.event === 'SubagentStop'/, 'the renderer does not treat it as Stop');
+  assert.match(hive, /e\.event === 'SubagentStop'\) \{[\s\S]{0,300}status: 'working'/, 'it counts as activity');
+});
+
+test('M5 through the real shim: an Explore subagent ending gives no idle notice', async (t) => {
+  const f = await floor(t);
+  if (!(await canListen(path.join(f.home, 'hive')))) { t.skip('this environment forbids local sockets'); return; }
+  f.server.start();
+  t.after(() => f.server.stop());
+  const notified = [];
+  f.server.notify = (agentId, msg) => notified.push([agentId, msg]);
+  const shim = path.join(f.home, 'hive', 'bin', 'cth-hook.cjs');
+  await new Promise((resolve) => {
+    const child = require('node:child_process').spawn(process.execPath, [shim], {
+      env: { ...process.env, AGENT_ID: 'jim-1', HIVE_SOCK: f.hive.sockPath(), HIVE_HOOK_TOKEN: f.auth.token('jim-1') },
+    });
+    child.on('close', resolve);
+    child.stdin.end(JSON.stringify({ hook_event_name: 'SubagentStop', agent_id: 'explore-1', session_id: 's' }));
+  });
+  assert.deepEqual(notified, []);
+});

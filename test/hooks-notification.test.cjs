@@ -94,11 +94,12 @@ test('Stop with stop_hook_active does NOT re-notify', async (t) => {
     'an already-re-entered Stop boundary must not spam another toast');
 });
 
-test('SubagentStop behaves the same as Stop', async (t) => {
+// Dwight M5: since the shims send the hive agent's id, a SubagentStop arrives as the
+// parent mid-turn. It is not the parent's Stop: no 'finished - idle' toast.
+test('SubagentStop is not the agent\'s Stop: no idle notice', async (t) => {
   const { fire } = await floor(t);
   await fire({ hook_event_name: 'SubagentStop' });
-  assert.equal(notifications.length, 1);
-  assert.equal(notifications[0].body, 'finished — idle');
+  assert.equal(notifications.length, 0);
 });
 
 test('notifications setting off suppresses the OS toast but the hook still resolves', async (t) => {

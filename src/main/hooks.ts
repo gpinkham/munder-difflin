@@ -789,7 +789,15 @@ If it says "Denied", do not push.`;
       this.rulesDueAfterCompact.add(agentId);
     }
 
-    if ((event === 'Stop' || event === 'SubagentStop') && agentId) {
+    // A subagent finishing is not its agent finishing (Dwight M5): since the shims send
+    // the hive agent's id, a SubagentStop arrives as the parent mid-turn. Report it as
+    // activity only: no idle notice, nothing that waits for the agent to be idle.
+    if (event === 'SubagentStop' && agentId) {
+      this.emit(agentId, event, p);
+      return {};
+    }
+
+    if (event === 'Stop' && agentId) {
       // Respect any upstream Stop hook that already re-entered this boundary.
       if (p.stop_hook_active) { this.emit(agentId, event, p); return {}; }
       // Never turn unread hive mail into a forced continuation at Stop. That old
