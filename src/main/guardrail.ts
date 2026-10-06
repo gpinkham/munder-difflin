@@ -32,40 +32,8 @@ export const MATCHERS = [
   'path_in_other_agent_workspace',
 ] as const;
 
-export type BackstopDoes = 'block' | 'ask' | 'log';
-
-export interface Backstop {
-  on: boolean;
-  /** block = deny the call; ask = the operator answers (or approves on a card);
-   *  log = record what it would have done and let the call run. */
-  does: BackstopDoes;
-  /** Action classes the operator may approve one at a time on a card. `ask` only. */
-  approve_on_card?: string[];
-  match: PolicyRule['match'];
-  /** What the agent is told when the backstop stops it. Defaults to the principle. */
-  message?: string;
-  /** If the backstop cannot be evaluated: let the call run (allow) or stop it (deny). */
-  on_error?: 'allow' | 'deny';
-}
-
-export interface GuardrailRule {
-  id: string;
-  /** The sentence the agents are given. */
-  principle: string;
-  /** 'all', or the agent ids the principle (and its backstop) apply to. */
-  agents: 'all' | string[];
-  why?: string;
-  backstop?: Backstop;
-}
-
-export interface GuardrailFile {
-  version: 1;
-  /** Bumped on every save, so agents' rendered instructions know they are stale. */
-  rev: number;
-  defaults?: { on_error?: 'allow' | 'deny' };
-  report_check?: { mode?: PolicyMode };
-  rules: GuardrailRule[];
-}
+export type { BackstopDoes, Backstop, GuardrailRule, GuardrailFile } from '../shared/guardrail';
+import type { Backstop, BackstopDoes, GuardrailRule, GuardrailFile } from '../shared/guardrail';
 
 const DOES: readonly BackstopDoes[] = ['block', 'ask', 'log'];
 

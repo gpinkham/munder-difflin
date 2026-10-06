@@ -48,7 +48,9 @@ test('the preload bridge is exposed as `cth`, and the panel uses that name', () 
 
   const panel = code(PANEL);
   const globals = new Set([...panel.matchAll(/window\.([A-Za-z_$][\w$]*)/g)].map((m) => m[1]));
+  const BROWSER = new Set(['confirm']); // the browser's own, not a bridge
   for (const g of globals) {
+    if (BROWSER.has(g)) continue;
     assert.ok(exposed.includes(g), `panel reads window.${g}, which no preload bridge registers`);
   }
 });
@@ -66,8 +68,8 @@ test('the panel does not cast `window` to a shape of its own invention', () => {
 test('every rules method the panel calls is defined in the preload', () => {
   const panel = read(PANEL);
   const preload = read(PRELOAD);
-  const called = [...panel.matchAll(/window\.cth\.(rules[A-Za-z]*)\s*\(/g)].map((m) => m[1]);
-  assert.ok(called.length >= 5, `expected the panel to call several rules methods, saw ${called.length}`);
+  const called = [...panel.matchAll(/window\.cth\.((?:rules|guardrail)[A-Za-z]*)\s*\(/g)].map((m) => m[1]);
+  assert.ok(called.length >= 4, `expected the panel to call several rules methods, saw ${called.length}`);
   for (const m of new Set(called)) {
     assert.match(preload, new RegExp(`\\n\\s*${m}:`), `preload has no ${m} on the bridge`);
   }
@@ -78,8 +80,8 @@ test('every rules method the panel calls is defined in the preload', () => {
 test('every rules channel in the preload has an ipcMain handler', () => {
   const preload = read(PRELOAD);
   const main = read(MAIN);
-  const channels = [...preload.matchAll(/rules[A-Za-z]*:[^\n]*ipcRenderer\.invoke\('([^']+)'/g)].map((m) => m[1]);
-  assert.ok(channels.length >= 5, `expected several rules:* channels, saw ${channels.length}`);
+  const channels = [...preload.matchAll(/(?:rules|guardrail)[A-Za-z]*:[\s\S]{0,160}?ipcRenderer\.invoke\('([^']+)'/g)].map((m) => m[1]);
+  assert.ok(channels.length >= 4, `expected several rules and guardrail channels, saw ${channels.length}`);
   for (const ch of channels) {
     assert.ok(main.includes(`ipcMain.handle('${ch}'`), `no ipcMain.handle for '${ch}'`);
   }

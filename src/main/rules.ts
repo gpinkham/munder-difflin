@@ -577,16 +577,21 @@ export class RulesManager {
    * a human can see the number move and retire something, instead of being
    * refused after writing the rule.
    */
-  capReport(agentIds: string[], candidate?: Rule): {
-    global: { count: number; tokens: number; max: number; maxTokens: number; over: boolean };
-    perAgent: Record<string, { count: number; tokens: number; max: number; maxTokens: number; over: boolean }>;
-    over: string[];
-  } {
+  capReport(agentIds: string[], candidate?: Rule): ReturnType<RulesManager['capReportFor']> {
     const store = this.read();
     let rules = store?.rules ?? [];
     if (candidate) {
       rules = [...rules.filter((r) => r.id !== candidate.id), candidate];
     }
+    return this.capReportFor(rules, agentIds);
+  }
+
+  /** The cap report for a whole set of principles, e.g. the one a save would write. */
+  capReportFor(rules: Rule[], agentIds: string[]): {
+    global: { count: number; tokens: number; max: number; maxTokens: number; over: boolean };
+    perAgent: Record<string, { count: number; tokens: number; max: number; maxTokens: number; over: boolean }>;
+    over: string[];
+  } {
     const active = rules.filter((r) => (r.status ?? 'active') === 'active');
     const gTokens = active.reduce((n, r) => n + RulesManager.estimateTokens(r.text), 0);
     const global = {

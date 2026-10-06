@@ -565,13 +565,29 @@ export class PolicyEngine {
     };
   }
 
-  /** The loaded rules as the Rules panel shows them (read-only), in evaluation order.
-   *  Nothing when no policy file is configured or it failed to load. */
-  enforcedRules(): Array<{ id: string; decision: string; mode: PolicyMode; grantable: string[]; reason: string }> {
-    return this.rules.map((r) => ({
-      id: r.id, decision: r.decision, mode: r.mode ?? this.defaults.mode,
-      grantable: Array.isArray(r.grantable) ? [...r.grantable] : [], reason: r.reason,
-    }));
+  /** The engine's own check of rules about to be saved (the Rules screen), as
+   *  "<id>: <why>". Empty when every rule would load. */
+  checkRules(rules: PolicyRule[]): string[] {
+    const out: string[] = [];
+    for (const r of rules) {
+      const why = this.validate(r);
+      if (why) out.push(`${r?.id ?? '(no id)'}: ${why}`);
+    }
+    return out;
+  }
+
+  /** Would this rule fire on this call? For the Rules screen's tester: it logs and
+   *  records nothing, and never touches the loaded rules. */
+  wouldMatch(rule: PolicyRule, p: PolicyPayload): { fires: boolean; on?: string; error?: string } {
+    const why = this.validate(rule);
+    if (why) return { fires: false, error: why };
+    if (rule.agents && !(p.agent_id && rule.agents.includes(p.agent_id))) return { fires: false };
+    try {
+      const hit = this.matches(rule, p, { commands: null });
+      return hit ? { fires: true, on: hit } : { fires: false };
+    } catch (e) {
+      return { fires: false, error: e instanceof Error ? e.message : String(e) };
+    }
   }
 
   /** Reason a rule is unusable, or null. Rejected at load, never at evaluation. */

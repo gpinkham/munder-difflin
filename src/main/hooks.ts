@@ -20,7 +20,7 @@ import type { ControlRegistry } from './control';
 import type { CircuitBreaker } from './breaker';
 import { estimateCostUsd } from './pricing';
 import { validateHookEvent } from '../shared/hookEvents';
-import { PolicyEngine, type AgentWorkspace, type PolicyStatus } from './policy';
+import { PolicyEngine, type AgentWorkspace, type PolicyPayload, type PolicyRule, type PolicyStatus } from './policy';
 import { ReportCheck, REPORT_CHECK_SENDER, type ReportMessage } from './reportCheck';
 import { GrantDesk, GrantStore, type GrantRequest } from './grants';
 import { WORKER_WAKE_ANSWERED_EVENTS } from './workerWake';
@@ -285,16 +285,27 @@ export class HookServer {
     }
   }
 
-  /** The enforced rules for the Rules panel, with the load status, so a broken file
-   *  (nothing enforced) never reads like no file. */
-  policyRules(): { configured: boolean; file: string | null; error: string | null; rules: ReturnType<PolicyEngine['enforcedRules']> } {
-    const none = { configured: false, file: null, error: null, rules: [] };
-    if (!this.hive.root()) return none;
-    try {
-      const e = this.policyEngine();
-      const st = e.status;
-      return { configured: st.configured, file: st.file, error: st.error, rules: e.enforcedRules() };
-    } catch { return none; }
+  /** Re-read guardrail.json after the Rules screen saved it: an explicit operator
+   *  action, so it takes effect now instead of at the next start. */
+  reloadPolicy(): PolicyStatus | null {
+    if (!this.hive.root()) return null;
+    const e = this.policyEngine();
+    e.load();
+    // The approvals desk follows the rules: on when some backstop asks with approve on
+    // a card. Pending requests survive a reload while it stays on.
+    if (!e.grantsActive) this.desk = null;
+    else if (!this.desk) this.desk = undefined;
+    return e.status;
+  }
+
+  /** The engine's own check of the rules a save would load. */
+  checkEngineRules(rules: PolicyRule[]): string[] {
+    return this.policyEngine().checkRules(rules);
+  }
+
+  /** Would this rule fire on this call (the Rules screen's tester). */
+  wouldMatch(rule: PolicyRule, p: PolicyPayload): { fires: boolean; on?: string; error?: string } {
+    return this.policyEngine().wouldMatch(rule, p);
   }
 
   /** Current guardrail status, for fleet.json. Null when no hive is configured. */

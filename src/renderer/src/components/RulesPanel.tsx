@@ -1,401 +1,247 @@
 /**
- * RulesPanel — authoring surface for agent authority rules (md-146 Phase 3).
+ * RulesPanel: the one place rules live and change (finish plan item 2, spec v3).
  *
- * Top-level on purpose, not a tab inside the per-agent modal. A rule is usually
- * about the floor rather than about one agent, and the per-agent modal is the
- * wrong home for something global: it also happens to be the surface god is
- * excluded from, which is how the orchestrator ended up unable to hold the rules
- * it most needed. The per-agent modal gets a READ-ONLY view instead.
+ * A rule is a guiding principle (the sentence every targeted agent is given) and may
+ * have a BACKSTOP (what the hook enforces on every tool call). Both live in one file,
+ * hive/policy/guardrail.json, which main reads, validates, writes and reloads; this
+ * screen only edits a draft and sends the whole file back with the stamp it read, so a
+ * file changed elsewhere is never overwritten silently.
  *
- * The cap is shown while authoring rather than enforced afterwards. A refusal
- * after the writing is done tells you nothing useful; a live count lets the author
- * see the number move and retire something first.
+ * Top-level on purpose, not a tab inside the per-agent modal: a rule is usually about
+ * the floor, and the per-agent modal is the surface god is excluded from (md-140). The
+ * per-agent modal gets the read-only RulesInEffect view instead.
  */
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useStore } from '@/store/store';
 import { PixelButton } from './PixelButton';
-
-interface Rule {
-  id: string;
-  text: string;
-  scope?: { kind: 'global' } | { kind: 'agents'; ids: string[] } | string;
-  why?: string;
-  status?: 'active' | 'retired';
-  added_by?: string;
-  added?: string;
-  retired?: string;
-  enforceable?: string;
-}
-interface CapEntry { count: number; tokens: number; max: number; maxTokens: number; over: boolean }
-interface Overview {
-  active: boolean;
-  rev: number;
-  rules: Rule[];
-  targets: Record<string, string[]>;
-  caps: { global: CapEntry; perAgent: Record<string, CapEntry>; over: string[] };
-  deliveredRevs: Record<string, number | null>;
-}
-
-/** The preload bridge is `window.cth` — the name `contextBridge.exposeInMainWorld`
- *  actually registers (`src/preload/index.ts:1439`), typed as `CthApi` in
- *  `src/preload/index.d.ts`. Reaching for it through a hand-written
- *  `window as unknown as { api?: … }` cast is what shipped this panel with an
- *  eternal "Loading rules…": the cast invents a global that does not exist, so every
- *  call optional-chained away to `undefined` and no error was ever thrown. Go through
- *  the declared global so the compiler checks both the name and the methods; only the
- *  RESULT is cast, because the preload types these channels as `Promise<unknown>`. */
-type UpsertResult = { ok: boolean; reason?: string; rev?: number; rendered?: string[]; detail?: unknown };
-type RetireResult = { ok: boolean; reason?: string; rev?: number; rendered?: string[] };
-
-const rulesApi = {
-  overview: () => window.cth.rulesOverview() as Promise<Overview>,
-  capPreview: (c: unknown) => window.cth.rulesCapPreview(c) as Promise<Overview['caps']>,
-  upsert: (r: unknown, rev?: number) => window.cth.rulesUpsert(r, rev) as Promise<UpsertResult>,
-  retire: (id: string, rev?: number) => window.cth.rulesRetire(id, rev) as Promise<RetireResult>,
-  inEffect: (id: string) =>
-    window.cth.rulesInEffect(id) as Promise<{ rev: number; rules: Rule[]; deliveredRev: number | null } | null>
-};
-
-const slug = (s: string): string =>
-  s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
+import type { BackstopDoes, GuardrailFile, GuardrailRule, GuardrailTestResult, GuardrailView } from '../../../shared/guardrail';
+import { DOES, describeBackstop, emptyDraft, fromDraft, statusLine, toDraft, type Draft } from './rulesView';
 
 const row: CSSProperties = { display: 'flex', gap: 8, alignItems: 'center' };
 const label: CSSProperties = { fontSize: 11, opacity: 0.75, textTransform: 'uppercase', letterSpacing: 0.4 };
 const box: CSSProperties = { border: '1px solid rgba(128,128,128,0.35)', borderRadius: 4, padding: 10 };
 const input: CSSProperties = { width: '100%', padding: '6px 8px', fontFamily: 'inherit', fontSize: 12 };
-
-/**
- * The rules the hook ENFORCES (policy/engine.json), read-only. They are a different
- * thing from the rules below, which are text delivered to agents (rules.json), and
- * until 2026-10-06 they had no screen: the panel was empty while a push rule was live.
- * Edited in engine.json and read at startup, so this view never writes.
- */
-function EnforcedRules() {
-  const [rules, setRules] = useState<Awaited<ReturnType<typeof window.cth.policyRules>> | null>(null);
-  useEffect(() => {
-    window.cth.policyRules().then(setRules, (e) =>
-      setRules({ configured: false, file: null, error: e instanceof Error ? e.message : String(e), rules: [] }));
-  }, []);
-  if (!rules) return null;
-  const list = rules.rules;
-  const what = (r: { decision: string; mode: string; grantable: string[] }): string =>
-    r.mode === 'dry_run' ? 'logs only (dry run)'
-      : r.decision === 'deny' ? 'blocks'
-      : r.grantable.length ? 'asks; a push in the approvable form goes to the Approvals card' : 'asks in the terminal';
-  return (
-    <div style={{ ...box, fontSize: 12, lineHeight: 1.5 }}>
-      <div style={{ fontWeight: 600, marginBottom: 6 }}>Enforced by the hook ({list.length})</div>
-      {rules.file && <div style={{ opacity: 0.7, marginBottom: 6 }}>From <code>{rules.file}</code></div>}
-      {rules.error
-        ? <div style={{ color: 'var(--cth-coral, #c0392b)', fontWeight: 600 }}>The policy file did not load, so nothing is enforced: {rules.error}</div>
-        : list.length === 0
-          ? <div>No enforced rules. They live in <code>&lt;harnessHome&gt;/hive/policy/engine.json</code> and are read when the app starts.</div>
-          : (
-            <ul style={{ margin: 0, paddingLeft: 16 }}>
-              {list.map((r, i) => (
-                <li key={`${i}-${r.id}`}><code>{r.id}</code>: {what(r)}. {r.reason}</li>
-              ))}
-            </ul>
-          )}
-      <div style={{ opacity: 0.7, marginTop: 6 }}>Read-only here. Edit engine.json, then restart the app.</div>
-    </div>
-  );
-}
+const red: CSSProperties = { color: 'var(--cth-coral, #c0392b)', fontWeight: 600 };
 
 export function RulesPanel() {
   const agents = useStore((s) => s.agents);
-  const [ov, setOv] = useState<Overview | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [view, setView] = useState<GuardrailView | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const [errors, setErrors] = useState<string[]>([]);
   const [note, setNote] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [tryCmd, setTryCmd] = useState('');
+  const [tried, setTried] = useState<GuardrailTestResult | null>(null);
 
-  // draft
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [text, setText] = useState('');
-  const [why, setWhy] = useState('');
-  const [globalScope, setGlobalScope] = useState(true);
-  const [picked, setPicked] = useState<string[]>([]);
-  const [preview, setPreview] = useState<Overview['caps'] | null>(null);
-
-  /** Every agent on the roster, god INCLUDED. Excluding the orchestrator here is
-   *  the md-140 bug: the agent that most needs authority rules was the one with no
-   *  surface to carry them. There is deliberately no `isGod` filter. */
+  /** Every agent on the roster, god INCLUDED (md-140: the agent that most needs rules
+   *  was the one with no surface to carry them). */
   const targetable = useMemo(
-    () => agents.filter((a) => !a.archived).map((a) => ({ id: a.id, name: a.name, isGod: !!a.isGod })),
+    () => agents.filter((a) => !a.archived).map((a) => ({ id: a.id, name: a.name })),
     [agents]
   );
 
-  /** A load that produces neither an overview nor an error would leave the panel on
-   *  "Loading rules…" for ever, so treat an absent reply as a failure in its own
-   *  right rather than as "still waiting". */
+  /** A read that produces neither a view nor an error would leave the screen on
+   *  "Loading rules…" for ever, so an absent reply is a failure in its own right. */
   const load = useCallback(async () => {
     try {
-      const o = await rulesApi.overview();
-      if (!o) { setOv(null); setErr('the main process returned no rules overview'); return; }
-      setOv(o);
-      setErr(null);
-    } catch (e) { setOv(null); setErr(e instanceof Error ? e.message : String(e)); }
+      const v = await window.cth.guardrailRead();
+      if (!v) { setView(null); setLoadErr('Could not read the rules: the main process returned nothing'); return; }
+      setView(v);
+      setLoadErr(null);
+    } catch (e) { setView(null); setLoadErr(`Could not read the rules: ${e instanceof Error ? e.message : String(e)}`); }
   }, []);
   useEffect(() => { void load(); }, [load]);
 
-  const draftRule = useCallback((): Rule => ({
-    id: editingId ?? (slug(text) || 'rule'),
-    text: text.trim(),
-    scope: globalScope ? { kind: 'global' } : { kind: 'agents', ids: picked },
-    why: why.trim() || undefined,
-    status: 'active'
-  }), [editingId, text, why, globalScope, picked]);
+  const rules = view?.file?.rules ?? [];
+  const status = statusLine(view);
 
-  // Live cap preview as the draft changes — the point of authoring-time caps.
-  useEffect(() => {
-    let cancelled = false;
-    if (!text.trim()) { setPreview(null); return; }
-    void (async () => {
-      try {
-        const c = await rulesApi.capPreview(draftRule());
-        if (!cancelled) setPreview(c ?? null);
-      } catch { /* preview is advisory */ }
-    })();
-    return () => { cancelled = true; };
-  }, [text, why, globalScope, picked, draftRule]);
-
-  const reset = () => { setEditingId(null); setText(''); setWhy(''); setGlobalScope(true); setPicked([]); setPreview(null); };
-
-  const save = async () => {
-    if (!text.trim()) return;
-    if (!globalScope && !picked.length) { setErr('Pick at least one agent, or make the rule global.'); return; }
-    setBusy(true); setErr(null); setNote(null);
+  const save = useCallback(async (nextRules: GuardrailRule[], done: string) => {
+    if (!view) return;
+    setBusy(true); setErrors([]); setNote(null);
+    const base: GuardrailFile = view.file ?? { version: 1, rev: 0, rules: [] };
     try {
-      const res = await rulesApi.upsert(draftRule(), ov?.rev);
-      if (!res?.ok) {
-        setErr(res?.reason === 'over-cap'
-          ? 'Over the cap. Retire a rule before adding another — the cap is there to keep each rule salient.'
-          : res?.reason === 'stale-rev'
-            ? 'Someone else changed the rules while you were editing. Reloaded; re-check and save again.'
-            : `Could not save: ${res?.reason ?? 'unknown'}`);
-        if (res?.reason === 'stale-rev') await load();
-        return;
-      }
-      setNote(`Saved as rev ${res.rev}. Rendered to ${res.rendered?.length ?? 0} agent(s); each is told what changed on its next turn.`);
-      reset();
-      await load();
-    } finally { setBusy(false); }
+      const out = await window.cth.guardrailSave({ ...base, rules: nextRules }, view.stamp);
+      if (out.ok) { setDraft(null); setNote(`${done} (rev ${out.rev}). In effect now.`); }
+      else setErrors(out.errors.length ? out.errors : [out.reason]);
+    } catch (e) { setErrors([e instanceof Error ? e.message : String(e)]); }
+    setBusy(false);
+    await load();
+  }, [view, load]);
+
+  const saveDraft = () => {
+    if (!draft) return;
+    const prev = rules.find((r) => r.id === draft.id);
+    const rule = fromDraft(draft, prev);
+    if (!draft.allAgents && !draft.picked.length) { setErrors(['Pick at least one agent, or choose all agents.']); return; }
+    if (draft.isNew && rules.some((r) => r.id === rule.id)) { setErrors([`A rule with the id "${rule.id}" already exists.`]); return; }
+    const next = draft.isNew ? [...rules, rule] : rules.map((r) => (r.id === draft.id ? rule : r));
+    void save(next, draft.isNew ? 'Rule added' : 'Rule saved');
   };
 
-  const retire = async (id: string) => {
-    setBusy(true); setErr(null); setNote(null);
+  const toggle = (r: GuardrailRule) => {
+    const b = r.backstop;
+    if (!b) return;
+    void save(rules.map((x) => (x.id === r.id ? { ...x, backstop: { ...b, on: !b.on } } : x)),
+      b.on ? 'Backstop turned off' : 'Backstop turned on');
+  };
+
+  const remove = (r: GuardrailRule) => {
+    if (!window.confirm(`Delete the rule "${r.principle}"? A backup of the file is kept.`)) return;
+    void save(rules.filter((x) => x.id !== r.id), 'Rule deleted');
+  };
+
+  const tryIt = async () => {
+    if (!draft || !tryCmd.trim()) return;
     try {
-      const res = await rulesApi.retire(id, ov?.rev);
-      if (!res?.ok) { setErr(`Could not retire: ${res?.reason ?? 'unknown'}`); return; }
-      setNote(`Retired at rev ${res.rev}. Kept in the store as a tombstone, dropped from every rendered block.`);
-      await load();
-    } finally { setBusy(false); }
+      setTried(await window.cth.guardrailTest(fromDraft({ ...draft, hasBackstop: true }), tryCmd.trim(),
+        draft.allAgents ? undefined : draft.picked[0]));
+    } catch (e) { setTried({ fires: false, error: e instanceof Error ? e.message : String(e) }); }
   };
 
-  const edit = (r: Rule) => {
-    setEditingId(r.id);
-    setText(r.text);
-    setWhy(r.why ?? '');
-    const s = r.scope;
-    const isAgents = typeof s === 'object' && s !== null && (s as { kind?: string }).kind === 'agents';
-    setGlobalScope(!isAgents);
-    setPicked(isAgents ? [...((s as { ids?: string[] }).ids ?? [])] : []);
-  };
-
-  if (!ov) {
-    return <div style={{ fontSize: 12, opacity: 0.8 }}>{err ? `Rules unavailable: ${err}` : 'Loading rules…'}</div>;
-  }
-  if (!ov.active) {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <EnforcedRules />
-        <div style={{ ...box, fontSize: 12, lineHeight: 1.5 }}>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>Rules for agents are not set up for this hive.</div>
-          Create <code>&lt;harnessHome&gt;/hive/policy/rules.json</code> with{' '}
-          <code>{'{ "rev": 1, "rules": [] }'}</code> to switch this on. Until then nothing is
-          rendered, logged or delivered — the feature is dormant.
-        </div>
-      </div>
-    );
-  }
-
-  const active = ov.rules.filter((r) => (r.status ?? 'active') === 'active');
-  const retired = ov.rules.filter((r) => r.status === 'retired');
-  const caps = preview ?? ov.caps;
-  const overAgents = caps.over.filter((x) => x !== 'global');
+  const set = (patch: Partial<Draft>) => setDraft((d) => (d ? { ...d, ...patch } : d));
+  const nameOf = (id: string) => targetable.find((a) => a.id === id)?.name ?? id;
+  const startEdit = (d: Draft) => { setDraft(d); setErrors([]); setTried(null); setTryCmd(''); setNote(null); };
+  const caps = view?.caps;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <EnforcedRules />
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ ...row, justifyContent: 'space-between' }}>
-        <div style={{ fontSize: 12 }}>
-          <strong>rev {ov.rev}</strong> · {active.length} active rule{active.length === 1 ? '' : 's'}
-          {retired.length ? ` · ${retired.length} retired` : ''}
-        </div>
-        <div style={{ fontSize: 11, opacity: 0.75 }}>
-          global {caps.global.count}/{caps.global.max} · ~{caps.global.tokens}/{caps.global.maxTokens} tok
-        </div>
+        <div style={{ fontSize: 12, ...(status.bad || loadErr ? red : {}) }}>{loadErr ?? status.text}</div>
+        <PixelButton variant="primary" size="sm" disabled={busy || !!draft || !view} onClick={() => startEdit(emptyDraft())}>
+          + Add rule
+        </PixelButton>
       </div>
-
-      <div style={{ fontSize: 11, opacity: 0.8, lineHeight: 1.5 }}>
-        Saving bumps the revision, writes the rule into each targeted agent's pinned
-        memory block, and tells that agent what changed on its next turn. Nobody has to
-        paste anything.
-      </div>
-
-      {/* — author — */}
-      <div style={{ ...box, display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <div style={label}>{editingId ? `Edit rule · ${editingId}` : 'New rule'}</div>
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          rows={3}
-          placeholder="Write only inside your own agent folder. To reach another agent, write one message to your own outbox."
-          style={{ ...input, resize: 'vertical' }}
-        />
-        <input
-          value={why}
-          onChange={(e) => setWhy(e.target.value)}
-          placeholder="Why (optional) — the reason this exists, for whoever reads it in six months"
-          style={input}
-        />
-
-        <div style={label}>Applies to</div>
-        <div style={{ ...row, gap: 14 }}>
-          <label style={row}>
-            <input type="radio" checked={globalScope} onChange={() => setGlobalScope(true)} /> Every agent
-          </label>
-          <label style={row}>
-            <input type="radio" checked={!globalScope} onChange={() => setGlobalScope(false)} /> Pick agents
-          </label>
+      {caps && (
+        <div style={{ fontSize: 11, opacity: 0.75, ...(caps.over.length ? red : {}) }}>
+          Principles for all agents: {caps.global.count} of {caps.global.max} used
+          {caps.over.length ? ` · over the cap for ${caps.over.join(', ')}` : ''}
         </div>
-        {!globalScope && (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-            {targetable.map((a) => (
-              <label key={a.id} style={row}>
-                <input
-                  type="checkbox"
-                  checked={picked.includes(a.id)}
-                  onChange={(e) => setPicked((p) => e.target.checked ? [...p, a.id] : p.filter((x) => x !== a.id))}
-                />
-                <span style={{ fontSize: 12 }}>{a.name}{a.isGod ? ' (orchestrator)' : ''}</span>
-              </label>
-            ))}
-            {!targetable.length && <span style={{ fontSize: 11, opacity: 0.7 }}>No agents on the roster.</span>}
-          </div>
-        )}
+      )}
+      {note && <div style={{ fontSize: 12 }}>{note}</div>}
+      {errors.length > 0 && !draft && (
+        <div style={{ ...box, ...red, fontSize: 12 }}>{errors.map((e) => <div key={e}>{e}</div>)}</div>
+      )}
 
-        {/* per-agent budget, live */}
-        <div style={{ fontSize: 11, opacity: 0.85, display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-          {targetable.map((a) => {
-            const c = caps.perAgent[a.id];
-            if (!c) return null;
-            return (
-              <span key={a.id} style={{ color: c.over ? '#c0392b' : undefined }}>
-                {a.name} {c.count}/{c.max} · ~{c.tokens}/{c.maxTokens} tok
-              </span>
-            );
-          })}
-        </div>
-
-        {(caps.global.over || overAgents.length > 0) && (
-          <div style={{ fontSize: 11, color: '#c0392b', lineHeight: 1.5 }}>
-            Over the cap{overAgents.length ? ` for ${overAgents.join(', ')}` : ' globally'}. Saving is
-            blocked until something is retired. The cap is an alignment mechanism, not a
-            budget: fewer rules means each one is actually held.
-          </div>
-        )}
-
-        <div style={row}>
-          <PixelButton
-            size="sm"
-            onClick={() => void save()}
-            disabled={busy || !text.trim() || caps.global.over || overAgents.length > 0}
-          >
-            {editingId ? 'Save changes' : 'Add rule'}
-          </PixelButton>
-          {editingId && <PixelButton size="sm" variant="secondary" onClick={reset}>Cancel</PixelButton>}
-        </div>
-      </div>
-
-      {err && <div style={{ fontSize: 11, color: '#c0392b' }}>{err}</div>}
-      {note && <div style={{ fontSize: 11, opacity: 0.85 }}>{note}</div>}
-
-      {/* — active rules — */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={label}>Active</div>
-        {!active.length && <div style={{ fontSize: 12, opacity: 0.7 }}>No rules yet.</div>}
-        {active.map((r) => {
-          const hit = ov.targets[r.id] ?? [];
-          const names = hit.map((id) => targetable.find((a) => a.id === id)?.name ?? id);
-          return (
-            <div key={r.id} style={{ ...box, display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <div style={{ fontSize: 12, lineHeight: 1.5 }}>{r.text}</div>
-              {r.why && <div style={{ fontSize: 11, opacity: 0.7 }}>Why: {r.why}</div>}
-              <div style={{ fontSize: 11, opacity: 0.75 }}>
-                {typeof r.scope === 'object' && r.scope && (r.scope as { kind?: string }).kind === 'agents'
-                  ? `Applies to: ${names.join(', ') || '(nobody — check the agent ids)'}`
-                  : `Applies to every agent (${hit.length})`}
-                {r.added_by ? ` · added by ${r.added_by}` : ''}{r.added ? ` ${r.added}` : ''}
-              </div>
-              <div style={row}>
-                <PixelButton size="sm" variant="secondary" onClick={() => edit(r)} disabled={busy}>Edit</PixelButton>
-                <PixelButton size="sm" variant="secondary" onClick={() => void retire(r.id)} disabled={busy}>Retire</PixelButton>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* — tombstones — */}
-      {retired.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <div style={label}>Retired</div>
-          <div style={{ fontSize: 11, opacity: 0.7, lineHeight: 1.5 }}>
-            Kept on purpose. A rule that simply vanishes leaves the next reader noticing a
-            gap and re-opening the question it settled.
-          </div>
-          {retired.map((r) => (
-            <div key={r.id} style={{ fontSize: 11, opacity: 0.65, textDecoration: 'line-through' }}>
-              {r.text}{r.retired ? ` · retired ${r.retired}` : ''}
-            </div>
-          ))}
+      {rules.length === 0 && view && !view.error && (
+        <div style={{ ...box, fontSize: 12 }}>
+          No rules yet. A rule is a sentence your agents are given, for example &quot;Do not push without my
+          approval&quot;. Add a backstop to have the hook enforce it.
         </div>
       )}
 
-      {/* — delivery audit — */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        <div style={label}>Delivery</div>
-        <div style={{ fontSize: 11, opacity: 0.75, lineHeight: 1.6 }}>
-          {targetable.map((a) => {
-            const d = ov.deliveredRevs[a.id];
-            const current = d === ov.rev;
-            return (
-              <span key={a.id} style={{ marginRight: 12 }}>
-                {a.name}: {d === null ? 'not yet told' : `told rev ${d}`}
-                {current ? ' ✓' : ' · notice pending'}
-              </span>
-            );
-          })}
+      {rules.map((r) => (
+        <div key={r.id} style={{ ...box, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ ...row, justifyContent: 'space-between' }}>
+            <div style={{ fontSize: 13 }}>{r.principle}</div>
+            <div style={{ fontSize: 11, opacity: 0.75, whiteSpace: 'nowrap' }}>
+              {r.agents === 'all' ? 'all agents' : r.agents.map(nameOf).join(', ')}
+            </div>
+          </div>
+          <div style={{ ...row, justifyContent: 'space-between' }}>
+            <div style={{ fontSize: 11, opacity: r.backstop?.on === false ? 0.55 : 0.85 }}>{describeBackstop(r)}</div>
+            <div style={row}>
+              {r.backstop && (
+                <PixelButton variant="secondary" size="sm" disabled={busy || !!draft} onClick={() => toggle(r)}>
+                  {r.backstop.on ? 'Turn off' : 'Turn on'}
+                </PixelButton>
+              )}
+              <PixelButton variant="secondary" size="sm" disabled={busy || !!draft} onClick={() => startEdit(toDraft(r))}>Edit</PixelButton>
+              <PixelButton variant="destructive" size="sm" disabled={busy || !!draft} onClick={() => remove(r)}>Delete</PixelButton>
+            </div>
+          </div>
+          {r.agents !== 'all' && r.backstop && <div style={{ fontSize: 10, opacity: 0.6 }}>The backstop applies to these agents only.</div>}
         </div>
+      ))}
+
+      {draft && (
+        <div style={{ ...box, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={label}>{draft.isNew ? 'New rule' : `Edit rule ${draft.id}`}</div>
+          <div style={label}>Principle: what your agents are told</div>
+          <textarea style={{ ...input, minHeight: 48 }} value={draft.principle}
+            onChange={(e) => set({ principle: e.target.value })} placeholder="Do not push without my approval." />
+          <div style={label}>Applies to</div>
+          <div style={{ ...row, flexWrap: 'wrap' }}>
+            <label style={{ fontSize: 12 }}>
+              <input type="checkbox" checked={draft.allAgents} onChange={(e) => set({ allAgents: e.target.checked })} /> All agents
+            </label>
+            {!draft.allAgents && targetable.map((a) => (
+              <label key={a.id} style={{ fontSize: 12 }}>
+                <input type="checkbox" checked={draft.picked.includes(a.id)}
+                  onChange={(e) => set({ picked: e.target.checked ? [...draft.picked, a.id] : draft.picked.filter((x) => x !== a.id) })} /> {a.name}
+              </label>
+            ))}
+          </div>
+          <label style={{ fontSize: 12 }}>
+            <input type="checkbox" checked={draft.hasBackstop} onChange={(e) => set({ hasBackstop: e.target.checked })} />{' '}
+            Add a backstop: the hook checks every tool call
+          </label>
+          {draft.hasBackstop && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingLeft: 12 }}>
+              <div style={row}>
+                <span style={{ fontSize: 12 }}>What it does</span>
+                <select value={draft.does} onChange={(e) => set({ does: e.target.value as BackstopDoes })}>
+                  {DOES.map((d) => <option key={d.v} value={d.v}>{d.label}</option>)}
+                </select>
+                <label style={{ fontSize: 12 }}><input type="checkbox" checked={draft.on} onChange={(e) => set({ on: e.target.checked })} /> On</label>
+              </div>
+              {draft.does === 'ask' && (
+                <label style={{ fontSize: 12 }}>
+                  <input type="checkbox" checked={draft.approveOnCard} onChange={(e) => set({ approveOnCard: e.target.checked })} />{' '}
+                  Let me approve one exact git push on a card
+                </label>
+              )}
+              {draft.does === 'log' && (
+                <div style={{ fontSize: 11, opacity: 0.7 }}>Log only records what it would have done and lets the call run.</div>
+              )}
+              <div style={label}>Tool (comma separated)</div>
+              <input style={input} value={draft.tool} onChange={(e) => set({ tool: e.target.value })} placeholder="Bash" />
+              <div style={label}>Command pattern (regular expression)</div>
+              <input style={input} value={draft.commandMatches} onChange={(e) => set({ commandMatches: e.target.value })} placeholder="^git\s+push\b" />
+              <div style={label}>Or a path pattern</div>
+              <input style={input} value={draft.pathGlob} onChange={(e) => set({ pathGlob: e.target.value })} placeholder="**/secrets/**" />
+              <label style={{ fontSize: 12 }}>
+                <input type="checkbox" checked={draft.otherWorkspace} onChange={(e) => set({ otherWorkspace: e.target.checked })} />{' '}
+                Fires when a call writes inside another agent&apos;s workspace
+              </label>
+              <div style={label}>Message to the agent when stopped (optional)</div>
+              <input style={input} value={draft.message} onChange={(e) => set({ message: e.target.value })} placeholder="Defaults to the principle" />
+              <div style={label}>Try it: would this stop a command?</div>
+              <div style={row}>
+                <input style={input} value={tryCmd} onChange={(e) => { setTryCmd(e.target.value); setTried(null); }} placeholder="git push origin main" />
+                <PixelButton variant="secondary" size="sm" disabled={!tryCmd.trim()} onClick={() => void tryIt()}>Try</PixelButton>
+              </div>
+              {tried && (
+                <div style={{ fontSize: 12, ...(tried.error ? red : {}) }}>
+                  {tried.error ? `Cannot test: ${tried.error}`
+                    : tried.fires ? `Yes: it would ${tried.does === 'block' ? 'block' : tried.does === 'ask' ? 'ask' : 'log'} this (${tried.on}).`
+                      : 'No: this command would run.'}
+                </div>
+              )}
+            </div>
+          )}
+          {errors.length > 0 && <div style={{ ...red, fontSize: 12 }}>{errors.map((e) => <div key={e}>{e}</div>)}</div>}
+          <div style={row}>
+            <PixelButton variant="primary" size="sm" disabled={busy || !draft.principle.trim()} onClick={saveDraft}>{busy ? 'Saving…' : 'Save'}</PixelButton>
+            <PixelButton variant="secondary" size="sm" disabled={busy} onClick={() => { setDraft(null); setErrors([]); }}>Cancel</PixelButton>
+          </div>
+        </div>
+      )}
+      <div style={{ fontSize: 10, opacity: 0.6 }}>
+        Saved to {view?.status?.file ?? 'hive/policy/guardrail.json'}. Each save keeps a backup and takes effect at once.
       </div>
     </div>
   );
 }
 
-/**
- * The per-agent READ-ONLY view, for the agent modal. The goal editor should show
- * an agent's complete standing context, and half of that now comes from the rules
- * store — but authoring stays in one place so a rule cannot be edited from two
- * surfaces with different ideas of the cap.
- */
+/** Read-only per-agent view, for the agent modal: the principles this agent is given. */
 export function RulesInEffect({ agentId }: { agentId: string }) {
-  const [data, setData] = useState<{ rev: number; rules: Rule[]; deliveredRev: number | null } | null>(null);
+  const [data, setData] = useState<{ rev: number; rules: Array<{ id: string; text: string }>; deliveredRev: number | null } | null>(null);
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const d = await rulesApi.inEffect(agentId);
+        const d = (await window.cth.rulesInEffect(agentId)) as typeof data;
         if (!cancelled) setData(d ?? null);
       } catch { /* absent bridge = feature off */ }
     })();

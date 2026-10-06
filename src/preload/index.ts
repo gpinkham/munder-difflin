@@ -3,6 +3,7 @@ import type { AgentProvider } from '../shared/agentProvider';
 import type { HireManifest } from '../shared/hire';
 export type { HireManifest } from '../shared/hire';
 import type { IntegrationRecord, IntegrationTemplate } from '../shared/integrations';
+import type { GuardrailFile, GuardrailRule, GuardrailSaveResult, GuardrailTestResult, GuardrailView } from '../shared/guardrail';
 export type { IntegrationRecord, IntegrationTemplate } from '../shared/integrations';
 import type { UpdateStatus } from '../shared/updateState';
 export type { UpdateStatus } from '../shared/updateState';
@@ -564,21 +565,6 @@ export interface PreservedWorktreeSnapshot {
   preservedAt: number;
 }
 
-/** The rules the hook enforces, as the Rules panel lists them, with the load status. */
-export interface EnforcedRule {
-  id: string;
-  decision: string;
-  mode: 'live' | 'dry_run';
-  grantable: string[];
-  reason: string;
-}
-export interface EnforcedRules {
-  configured: boolean;
-  file: string | null;
-  error: string | null;
-  rules: EnforcedRule[];
-}
-
 /** One approval waiting for the operator (HAG-49), as main holds it. */
 export interface PendingGrant {
   id: string;
@@ -897,8 +883,6 @@ const api = {
     ipcRenderer.invoke('hive:send', msg, from),
   /** HAG-49 approvals. All three report "off" unless a policy rule is grantable. */
   policyGrantsActive: (): Promise<boolean> => ipcRenderer.invoke('policy:grantsActive'),
-  /** The rules the hook enforces (policy/engine.json), read-only, in evaluation order. */
-  policyRules: (): Promise<EnforcedRules> => ipcRenderer.invoke('policy:rules'),
   policyPendingGrants: (): Promise<PendingGrant[]> => ipcRenderer.invoke('policy:pendingGrants'),
   policyDecideGrant: (requestId: string, approve: boolean): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('policy:decideGrant', requestId, approve),
@@ -1412,15 +1396,15 @@ const api = {
    *  store is created at module load, so an async read would arrive after the
    *  first render and the floor would flash empty. One blocking round trip at
    *  boot. `null` = no file (or unreadable) — the caller then uses localStorage. */
-  /** Authority rules (md-146). `overview` is everything the Rules panel needs in
-   *  one call; `capPreview` answers "what would this look like if I saved?" so the
-   *  cap is visible while authoring rather than a refusal afterwards. */
-  rulesOverview: (): Promise<unknown> => ipcRenderer.invoke('rules:overview'),
+  /** The principles one agent is given (read-only, for the agent modal). */
   rulesInEffect: (agentId: string): Promise<unknown> => ipcRenderer.invoke('rules:inEffect', agentId),
-  rulesCapPreview: (candidate?: unknown): Promise<unknown> => ipcRenderer.invoke('rules:capPreview', candidate),
-  rulesUpsert: (rule: unknown, expectedRev?: number): Promise<unknown> => ipcRenderer.invoke('rules:upsert', rule, expectedRev),
-  rulesRetire: (id: string, expectedRev?: number): Promise<unknown> => ipcRenderer.invoke('rules:retire', id, expectedRev),
-  rulesCaps: (): Promise<unknown> => ipcRenderer.invoke('rules:caps'),
+  /** The Rules screen (guardrail.json): read, save (whole file + the stamp it read), and
+   *  "would this backstop stop <command>?". Main validates, writes and reloads. */
+  guardrailRead: (): Promise<GuardrailView> => ipcRenderer.invoke('guardrail:read'),
+  guardrailSave: (file: GuardrailFile, stamp: number | null): Promise<GuardrailSaveResult> =>
+    ipcRenderer.invoke('guardrail:save', file, stamp),
+  guardrailTest: (rule: GuardrailRule, command: string, agentId?: string): Promise<GuardrailTestResult> =>
+    ipcRenderer.invoke('guardrail:test', rule, command, agentId),
 
   rosterReadSync: (): RosterSnapshot | null => {
     try { return ipcRenderer.sendSync('roster:readSync') ?? null; } catch { return null; }

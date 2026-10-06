@@ -110,7 +110,7 @@ test('a backstop that is off, or for other agents, does not fire; principle-only
   assert.equal(e.evaluate(pre('ls')).decision, 'allow');
   assert.equal(e.evaluate(pre('cat f', 'jim')).decision, 'allow');
   assert.equal(e.evaluate(pre('cat f', 'pam')).decision, 'deny');
-  assert.deepEqual(e.enforcedRules().map((r) => r.id), ['pam-only']);
+  assert.deepEqual(e.status.ruleIds, ['pam-only']);
 });
 
 test('all backstops off loads cleanly as nothing enforced; an empty file is an error', (t) => {

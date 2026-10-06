@@ -62,7 +62,8 @@ import { IntegrationBroker } from './integrationBroker';
 import * as integrations from './integrations';
 import { validateBaseUrl, buildAuthHeaders, resolveUpstreamUrl, secretRefFor, INTEGRATION_TEMPLATES } from '../shared/integrations';
 import { RosterStore } from './roster';
-import { RulesManager, RULE_CAPS } from './rules';
+import { GuardrailEditor } from './guardrailEditor';
+import { RulesManager } from './rules';
 import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog, type WorkerWakeFacts } from './workerWake';
@@ -3557,24 +3558,25 @@ function rulesAgentIds(): string[] {
     : [];
   return ids;
 }
-ipcMain.handle('rules:overview', () => rules.overview(rulesAgentIds()));
 ipcMain.handle('rules:inEffect', (_evt, agentId: unknown) =>
   typeof agentId === 'string' ? rules.inEffect(agentId) : null);
-ipcMain.handle('rules:capPreview', (_evt, candidate: unknown) =>
-  rules.capReport(rulesAgentIds(), (candidate ?? undefined) as never));
-ipcMain.handle('rules:upsert', (_evt, rule: unknown, expectedRev: unknown) =>
-  rules.upsert(rule as never, {
-    actor: 'user', agentIds: rulesAgentIds(),
-    expectedRev: typeof expectedRev === 'number' ? expectedRev : undefined
-  }));
-ipcMain.handle('rules:retire', (_evt, id: unknown, expectedRev: unknown) =>
-  typeof id === 'string'
-    ? rules.retire(id, {
-      actor: 'user', agentIds: rulesAgentIds(),
-      expectedRev: typeof expectedRev === 'number' ? expectedRev : undefined
-    })
-    : { ok: false, reason: 'id-required' });
-ipcMain.handle('rules:caps', () => RULE_CAPS);
+// Finish plan item 2: the Rules screen reads and saves guardrail.json through main
+// only. A save reloads the engine and re-renders the agents at once.
+const guardrailEditor = new GuardrailEditor({
+  policyDir: () => { const h = readConfig().harnessHome; return h ? join(h, 'hive', 'policy') : null; },
+  engine: hookServer,
+  principles: rules,
+  agentIds: rulesAgentIds,
+  afterSave: async () => { await rules.reconcile(); },
+  log: (row) => { try { hive.appendLog(row as Parameters<typeof hive.appendLog>[0]); } catch { /* best-effort */ } },
+});
+ipcMain.handle('guardrail:read', () => guardrailEditor.read());
+ipcMain.handle('guardrail:save', (_evt, file: unknown, stamp: unknown) =>
+  guardrailEditor.save(file as never, typeof stamp === 'number' ? stamp : null, 'user'));
+ipcMain.handle('guardrail:test', (_evt, rule: unknown, command: unknown, agentId: unknown) =>
+  typeof command === 'string'
+    ? guardrailEditor.test(rule as never, command, typeof agentId === 'string' ? agentId : undefined)
+    : { fires: false, error: 'no command to test' });
 
 ipcMain.handle('roster:read', () => roster.read());
 ipcMain.handle('roster:write', (_evt, snap: unknown) => roster.write(snap));
@@ -3944,7 +3946,6 @@ hive.setCaptureToolFailures(() => hookServer.reportCheckActive());
 hive.setApprovalHandler((agentId, msg) => hookServer.handleApprovalRequest(agentId, msg));
 hive.setGrantsActive(() => hookServer.grantsActive());
 ipcMain.handle('policy:grantsActive', () => hookServer.grantsActive());
-ipcMain.handle('policy:rules', () => hookServer.policyRules());
 ipcMain.handle('policy:pendingGrants', () => hookServer.pendingGrants());
 ipcMain.handle('policy:decideGrant', (_e, requestId: unknown, approve: unknown) =>
   typeof requestId === 'string' ? hookServer.decideGrant(requestId, approve === true) : { ok: false, error: 'bad request id' });
