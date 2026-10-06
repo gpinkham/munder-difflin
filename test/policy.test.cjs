@@ -17,7 +17,7 @@ function hive(rules, defaults) {
     const body = typeof rules === 'string'
       ? rules
       : JSON.stringify({ version: 1, ...(defaults ? { defaults } : {}), rules });
-    fs.writeFileSync(path.join(root, 'policy', 'authority.json'), body);
+    fs.writeFileSync(path.join(root, 'policy', 'engine.json'), body);
   }
   return root;
 }
@@ -1233,9 +1233,7 @@ test('21a. a hook-schema authority.json alone loads 0 rules and says why in plai
   assert.equal(e.ruleCount, 0);
   assert.equal(e.active, true, 'self-protection stays armed: a policy file exists');
   assert.match(e.error, /guardrail-hook schema/);
-  assert.match(e.error, /engine\.json/);
-  assert.match(e.error, /examples\/policy\/engine\.example\.json/, 'the fix it names must be a file that exists');
-  assert.ok(fs.existsSync(path.join(__dirname, '..', 'examples/policy/engine.example.json')));
+  assert.match(e.error, /guardrail\.json/, 'it names where the engine\'s rules live');
   const fail = rows.find((r) => r.kind === 'policy-load-failed');
   assert.ok(fail, 'the failure is a row, not silence');
   assert.equal(fail.rules_loaded, 0);
@@ -1252,7 +1250,7 @@ test('21b. engine.json beside the hook file loads, and authority.json is never w
   assert.equal(e.error, null);
   assert.equal(e.ruleCount, 5);
   const st = e.status;
-  assert.ok(st.file.endsWith('engine.json'));
+  assert.ok(st.file.endsWith('guardrail.json'), 'engine.json was moved into guardrail.json');
   assert.deepEqual(st.ruleIds, ['cross-agent-write', 'cross-agent-workspace', 'destructive-shared-state', 'bitbucket-merge', 'remote-push']);
   assert.ok(st.loadedAt);
   const loaded = rows.find((r) => r.kind === 'policy-loaded');
@@ -1265,10 +1263,13 @@ test('21c. every rule in the shipped pack is dry_run', () => {
   for (const r of PACK().rules) assert.equal(r.mode, 'dry_run', r.id);
 });
 
-test('21d. an engine-schema authority.json with no engine.json still loads (pre-md-216 installs)', () => {
+test('21d. an engine-schema authority.json alone is not the engine\'s file: 0 rules, self-protection armed', () => {
+  // Finish plan item 1: the engine reads only guardrail.json. No older install has to
+  // keep working (one build runs this), so authority.json is never read as rules.
   const { e } = hiveWith({ 'authority.json': PACK() });
-  assert.equal(e.error, null);
-  assert.equal(e.ruleCount, 5);
+  assert.equal(e.ruleCount, 0);
+  assert.equal(e.active, true);
+  assert.match(e.error, /guardrail\.json/);
 });
 
 test('21e. with engine.json present, a broken engine.json fails even if authority.json is fine', () => {

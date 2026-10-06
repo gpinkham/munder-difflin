@@ -25,7 +25,7 @@ function shipped() {
   for (const r of pack.rules) r.mode = 'live';
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'md-heldout-'));
   fs.mkdirSync(path.join(root, 'policy'));
-  fs.writeFileSync(path.join(root, 'policy', 'authority.json'), JSON.stringify({ version: 1, rules: pack.rules }));
+  fs.writeFileSync(path.join(root, 'policy', 'engine.json'), JSON.stringify({ version: 1, rules: pack.rules }));
   const rows = [];
   const e = new PolicyEngine(root, (row) => rows.push(row), () => ['agent-a']);
   e.load();

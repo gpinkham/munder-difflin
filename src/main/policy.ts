@@ -51,6 +51,7 @@ import {
   STRUCTURAL_UNRESOLVED, type EffectiveCommand, type Unresolved,
 } from './shell';
 import { corpusRecord, CORPUS_FILE, type CorpusContext } from './corpus';
+import { GUARDRAIL_FILE, LEGACY_ENGINE_FILE, MATCHERS, migrateLegacyPolicy, readGuardrail, toEngineRules } from './guardrail';
 
 /** Where a rule's path matcher reads its subject from, per tool. */
 const PATH_FIELDS = ['file_path', 'notebook_path', 'path'] as const;
@@ -60,14 +61,6 @@ const PATH_FIELDS = ['file_path', 'notebook_path', 'path'] as const;
  * implementation detail: every present key must match (AND), rules are evaluated
  * in file order, and first match wins. If you need OR, write two rules.
  */
-const MATCHERS = [
-  'tool',
-  'path_glob',
-  'path_not_glob',
-  'command_matches',
-  'command_not_matches',
-  'path_in_other_agent_workspace',
-] as const;
 
 /** Verbs whose written targets are removed wholesale, as opposed to written into. */
 const DESTROY_VERBS = new Set(['rm', 'rmdir', 'unlink', 'shred', 'find', 'mv']);
@@ -81,10 +74,12 @@ const DESTROY_VERBS = new Set(['rm', 'rmdir', 'unlink', 'shred', 'find', 'mv']);
  * rule with `unknown matcher "kind"`, and enforced nothing on either floor for as long
  * as it was installed. Sharing one file between two schemas means one reader is always
  * wrong, so each reader gets its own file and neither has to understand the other.
- * `authority.json` is still honoured when it is written in THIS schema, because that is
- * what the example pack told people to do before the split.
+ * Since finish plan item 1 the engine reads only guardrail.json; engine.json is moved
+ * into it once, and authority.json is never the engine's (it only explains, at load,
+ * that the rules live in guardrail.json).
  */
-export const ENGINE_POLICY_FILE = 'engine.json';
+/** The engine's rules file (finish plan item 1): guardrail.json, the backstops of the rules. */
+export const ENGINE_POLICY_FILE = GUARDRAIL_FILE;
 export const LEGACY_POLICY_FILE = 'authority.json';
 
 /** One agent's workspace roots, as the harness knows them: its registered cwd, its
@@ -215,6 +210,8 @@ export interface PolicyRule {
    * asks every time, exactly as before. Valid only on `ask` rules.
    */
   grantable?: string[];
+  /** Only these agents (guardrail.json `agents`); absent means every agent. */
+  agents?: string[];
   match: {
     tool?: string | string[];
     path_glob?: string;
@@ -422,28 +419,57 @@ export class PolicyEngine {
     this.loadedAt = null;
     this.reportCheckConfig = null;
     if (!this.policyDir) return;
-    const enginePath = join(this.policyDir, ENGINE_POLICY_FILE);
+    // One-time move of engine.json + rules.json into guardrail.json. A legacy rule the
+    // engine would have refused is not migrated: its file stays and its error is shown.
+    let migrationError: string | null = null;
+    try {
+      const m = migrateLegacyPolicy(this.policyDir, this.log, (r) => this.validate(r as PolicyRule));
+      migrationError = m.error ?? null;
+    } catch (e) {
+      migrationError = `migration to ${GUARDRAIL_FILE} failed: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    const guardrailPath = join(this.policyDir, GUARDRAIL_FILE);
+    const enginePath = join(this.policyDir, LEGACY_ENGINE_FILE);
     const legacyPath = join(this.policyDir, LEGACY_POLICY_FILE);
+    const hasGuardrail = existsSync(guardrailPath);
     const hasEngine = existsSync(enginePath);
     const hasLegacy = existsSync(legacyPath);
-    if (!hasEngine && !hasLegacy) { this.policyPath = enginePath; return; } // unconfigured → inert
-    // Either file arms policy self-protection: an install that has any policy at all
-    // must not let an agent rewrite it, whichever reader the file was written for.
+    if (!hasGuardrail && !hasEngine && !hasLegacy) { this.policyPath = guardrailPath; return; } // unconfigured → inert
+    // Any policy file arms self-protection: an install that has any policy at all must
+    // not let an agent rewrite it, whichever reader the file was written for.
     this.configured = true;
-    this.policyPath = hasEngine ? enginePath : legacyPath;
-
-    let parsed: PolicyFile;
-    try {
-      parsed = JSON.parse(readFileSync(this.policyPath, 'utf8')) as PolicyFile;
-    } catch (e) {
-      // Refuse a half-parsed policy. Partial enforcement is worse than none,
-      // because it is believed.
-      this.fail(e instanceof Error ? e.message : String(e));
+    if (!hasGuardrail) {
+      this.policyPath = hasEngine ? enginePath : legacyPath;
+      if (hasEngine) { this.fail(migrationError ?? `${LEGACY_ENGINE_FILE} could not be moved into ${GUARDRAIL_FILE}`); return; }
+      let legacy: unknown = null;
+      try { legacy = JSON.parse(readFileSync(legacyPath, 'utf8')); } catch { /* reported below */ }
+      let hookSchema = false;
+      try { hookSchema = !!legacy && typeof legacy === 'object' && isHookSchema(legacy as PolicyFile); } catch { /* not the hook's either */ }
+      this.fail(hookSchema
+        ? `${LEGACY_POLICY_FILE} is the guardrail-hook schema (match.kind), which this engine does not read; `
+          + `the engine's rules live in ${GUARDRAIL_FILE}. 0 engine rules loaded.`
+        : `${LEGACY_POLICY_FILE} is not read by the engine; the rules live in ${GUARDRAIL_FILE}. 0 engine rules loaded.`);
       return;
     }
+    this.policyPath = guardrailPath;
+    const g = readGuardrail(guardrailPath);
+    if (!g.ok) {
+      // Refuse a half-read policy. Partial enforcement is worse than none, because it
+      // is believed.
+      this.fail(g.error);
+      return;
+    }
+    const parsed: PolicyFile = {
+      version: 1,
+      ...(g.file.defaults?.on_error ? { defaults: { on_error: g.file.defaults.on_error } } : {}),
+      ...(g.file.report_check !== undefined ? { report_check: g.file.report_check } : {}),
+      rules: toEngineRules(g.file),
+    };
 
     try {
-      this.loadParsed(parsed, hasEngine);
+      // A file with rules whose backstops are all off enforces nothing ON PURPOSE; a
+      // file with no rules at all is a truncated write or a bad edit.
+      this.loadParsed(parsed, g.file.rules.length > 0);
     } catch (e) {
       // md-217 N1: a file that parses but has the wrong shape threw here and left
       // `configured: true, error: null` behind, which reads as healthy. Nothing that
@@ -456,7 +482,7 @@ export class PolicyEngine {
 
   /** Everything after the JSON parse. Split out so `load` can guarantee that a throw
    *  becomes a logged failure instead of a quiet zero. */
-  private loadParsed(parsed: PolicyFile, hasEngine: boolean): void {
+  private loadParsed(parsed: PolicyFile, noBackstopsIsFine: boolean): void {
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       this.fail(`policy file must be a JSON object with a "rules" array, got ${parsed === null ? 'null' : Array.isArray(parsed) ? 'an array' : typeof parsed}`);
       return;
@@ -465,17 +491,6 @@ export class PolicyEngine {
       this.fail(`"rules" must be an array, got ${parsed.rules === null ? 'null' : typeof parsed.rules}`);
       return;
     }
-    if (!hasEngine && isHookSchema(parsed)) {
-      // The one layout that silently enforced nothing for as long as it was installed:
-      // only the shell hook's file is present. Say so in words an operator can act on,
-      // instead of "unknown matcher" three times.
-      this.fail(
-        `${LEGACY_POLICY_FILE} is the guardrail-hook schema (match.kind), which this engine does not read; `
-        + `add ${ENGINE_POLICY_FILE} beside it (copy examples/policy/engine.example.json). 0 engine rules loaded.`
-      );
-      return;
-    }
-
     const invalid: Array<{ id: string; why: string }> = [];
     const rules: PolicyRule[] = [];
     for (const rule of parsed.rules ?? []) {
@@ -502,7 +517,7 @@ export class PolicyEngine {
         rc = undefined;
       }
     }
-    if (!rules.length) {
+    if (!rules.length && !noBackstopsIsFine) {
       // A policy file that exists but names no rules is a truncated write or a bad
       // hand edit far more often than a deliberate choice, and it enforces nothing.
       // Self-protection stays armed; the status says so loudly. (To turn the engine
@@ -757,6 +772,8 @@ export class PolicyEngine {
     }
 
     for (const rule of this.rules) {
+      // A backstop for named agents is not this agent's: it neither fires nor errors.
+      if (rule.agents && !(p.agent_id && rule.agents.includes(p.agent_id))) continue;
       let hit: string | null;
       try {
         hit = this.matches(rule, p, ctx);

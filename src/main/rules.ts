@@ -23,6 +23,7 @@
  *
  * Runs in the Electron main process.
  */
+import { GUARDRAIL_FILE, atomicWriteJson, backupGuardrail, readGuardrail, toPrinciples, validateGuardrail, type GuardrailFile, type GuardrailRule } from './guardrail';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync, copyFileSync, openSync, fsyncSync, closeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -217,13 +218,32 @@ export class RulesManager {
     return home ? join(home, 'hive', 'agents') : null;
   }
 
+  /** guardrail.json: the one rules file; principles are its rules' text. */
+  guardrailPath(): string | null {
+    const d = this.policyDir();
+    return d ? join(d, GUARDRAIL_FILE) : null;
+  }
+
   /** False when there is no store on disk. Every entry point checks this first. */
   get active(): boolean {
+    const g = this.guardrailPath();
     const p = this.storePath();
-    return !!p && existsSync(p);
+    return (!!g && existsSync(g)) || (!!p && existsSync(p));
   }
 
   read(): { rev: number; rules: Rule[] } | null {
+    // guardrail.json once it exists. The engine moves rules.json into it at app start
+    // (HookServer.start loads the policy before the first reconcile), so rules.json is
+    // read only before that move, or in a hive the app has not started on.
+    const g = this.guardrailPath();
+    if (g && existsSync(g)) {
+      const r = readGuardrail(g);
+      if (!r.ok) {
+        this.log({ kind: 'rules-load-failed', path: g, error: r.error });
+        return null;
+      }
+      return { rev: r.file.rev, rules: toPrinciples(r.file) };
+    }
     const p = this.storePath();
     if (!p || !existsSync(p)) return null;
     const f = readJson<RulesFile>(p);
@@ -603,6 +623,26 @@ export class RulesManager {
 
   /** Write the store with the rev bumped, atomically. */
   private commit(rules: Rule[], rev: number): boolean {
+    const g = this.guardrailPath();
+    if (g && existsSync(g)) {
+      // Principles live in guardrail.json: keep each rule's backstop, drop retired
+      // ones (the history file keeps the trail), back the file up, write atomically.
+      const cur = readGuardrail(g);
+      if (!cur.ok) return false;
+      const byId = new Map(cur.file.rules.map((r) => [r.id, r]));
+      const next: GuardrailFile = {
+        ...cur.file,
+        rev,
+        rules: rules.filter((r) => (r.status ?? 'active') === 'active').map((r) => {
+          const s = r.scope as RuleScope | undefined;
+          const agents: GuardrailRule['agents'] = s && typeof s === 'object' && s.kind === 'agents' ? [...s.ids] : 'all';
+          const prev = byId.get(r.id);
+          return { id: r.id, principle: r.text, agents, ...(r.why ? { why: r.why } : {}), ...(prev?.backstop ? { backstop: prev.backstop } : {}) };
+        }),
+      };
+      if (validateGuardrail(next).length) return false;
+      try { backupGuardrail(g); atomicWriteJson(g, next); return true; } catch { return false; }
+    }
     const p = this.storePath();
     if (!p) return false;
     const existing = readJson<RulesFile>(p) ?? {};

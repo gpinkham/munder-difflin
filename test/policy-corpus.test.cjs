@@ -254,7 +254,7 @@ test('md-136 e2e: the flag turns it off, and off writes no file at all', async (
 
 test('md-136 e2e: a corpus write that fails never changes the decision', async (t) => {
   const { engine, base, hiveRoot, corpusPath } = floor(t);
-  fs.rmSync(path.join(hiveRoot, 'policy', 'engine.json'));
+  fs.rmSync(path.join(hiveRoot, 'policy', 'guardrail.json'));
   fs.rmSync(corpusPath, { force: true });
   fs.mkdirSync(corpusPath, { recursive: true }); // a DIRECTORY where the file goes: append throws
   const v = deny(engine, base, `rm -rf ${path.join(base, 'wt', 'ryan-2')}/checkout`);

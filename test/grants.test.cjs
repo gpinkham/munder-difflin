@@ -243,13 +243,15 @@ test('live: a grant for the good URL is not used when the repo pushes elsewhere'
   assert.equal(e.evaluate(pre(PUSH, 'jim', dir)).decision, 'allow', 'the approved push itself still goes');
 });
 
-test('dry_run notes the grant and does not use it', () => {
+// guardrail.json: a dry_run rule is a "Log only" backstop, which has no approvals, so a
+// grant is neither used nor noted (it was noted as a would-be use before item 1).
+test('a log-only backstop never uses or notes a grant', () => {
   const { e, root, grants } = engine([{ ...PUSH_RULE, mode: 'dry_run' }]);
-  const g = grants.mint(request());
+  grants.mint(request());
   const v = e.evaluate(pre(PUSH));
   assert.equal(v.decision, 'allow');
   assert.equal(v.wouldDeny, true);
-  assert.equal(v.grantId, g.id);
+  assert.equal(v.grantId, undefined);
   assert.doesNotMatch(fs.readFileSync(path.join(root, 'policy', 'grants.jsonl'), 'utf8'), /"use"/);
 });
 
@@ -409,13 +411,13 @@ test('on: another push form while a request waits or a grant is open is refused 
   assert.equal(f.server.pendingGrants().length, 0);
 });
 
-test('dry_run: a noted grant never becomes an explicit allow', async (t) => {
+test('log only: a grant left from when it asked never becomes an explicit allow', async (t) => {
   const origin = gitRepo(t);
   const f = await floor(t, { version: 1, rules: [{ ...PUSH_RULE, mode: 'dry_run' }] });
-  f.drop({ ...REQUEST, cwd: origin });
-  const [p] = f.server.pendingGrants();
-  f.server.decideGrant(p.id, true);
-  assert.equal(decisionOf(await hook(f, PUSH, origin)), 'none', 'dry_run leaves the permission mode in charge');
+  // A grant minted while the backstop was "Ask me", still within its hour.
+  new GrantStore(f.grantsFile).mint({ id: 'r_old', agent_id: 'jim-1', command: PUSH, cwd: origin, reason: '', requested_at: '',
+    action: { class: 'git-push', summary: '', target: { remote_url: URL, ref: 'refs/heads/feat/x', sha: SHA } } });
+  assert.equal(decisionOf(await hook(f, PUSH, origin)), 'none', 'log only leaves the permission mode in charge');
   assert.doesNotMatch(fs.readFileSync(f.grantsFile, 'utf8'), /"op":"use"/, 'and the grant is not spent');
 });
 
