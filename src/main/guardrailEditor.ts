@@ -144,12 +144,12 @@ export class GuardrailEditor {
     const blocks = missing.filter((r) => r.backstop?.does === 'block');
     const rest = missing.filter((r) => r.backstop?.does !== 'block');
     const base: GuardrailFile = cur.file ?? { version: 1, rev: 0, rules: [] };
-    // First match wins. New blocks go first; new asks go before the first existing rule
-    // that does not block (an existing Ask or Log rule must not shadow them, Dwight
-    // L11); principles without a backstop and existing blocks keep their places.
-    const cut = base.rules.findIndex((r) => r.backstop && r.backstop.does !== 'block');
-    const at = cut === -1 ? base.rules.length : cut;
-    const rules = [...blocks, ...base.rules.slice(0, at), ...rest, ...base.rules.slice(at)];
+    // First match wins. Order: new blocks, existing blocks, new asks, existing
+    // non-blocks, each in its own order. An existing Ask or Log rule cannot shadow a
+    // new ask (Dwight L11) and no existing block ends up behind it (M6); moving a block
+    // ahead of a non-block only makes a call stricter.
+    const isBlock = (r: GuardrailRule) => r.backstop?.does === 'block';
+    const rules = [...blocks, ...base.rules.filter(isBlock), ...rest, ...base.rules.filter((r) => !isBlock(r))];
     // The starter rules are safety, not prose: the principles cap warns, never refuses
     // them (Dwight M2b).
     const out = await this.save({ ...base, rules }, cur.stamp, actor, { capCheck: false });

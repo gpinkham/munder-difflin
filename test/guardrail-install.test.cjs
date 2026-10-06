@@ -121,3 +121,20 @@ test('L11: a new ask goes before an existing rule that is not a block, so a Log 
   assert.deepEqual(g.rules.map((r) => r.id), ['bitbucket-merge', 'protected-branch-push', 'remote-push', 'my-push']);
   assert.equal(f.decide('git push origin feat/x'), 'ask');
 });
+
+// Dwight M6: the L11 order put an existing BLOCK behind the new ask when a non-block
+// rule came first. Order: new blocks, existing blocks, new asks, existing non-blocks
+// (each in its own order). Moving a block ahead only makes calls stricter.
+test('M6: an existing block is never put behind the new ask', async (t) => {
+  const f = await floor(t, { version: 1, rev: 1, rules: [
+    { id: 'watch', principle: 'Watch pushes to release.', agents: 'all', backstop: { on: true, does: 'log', match: { tool: 'Bash', command_matches: '^git\\s+push\\s+origin\\s+release\\b' } } },
+    { id: 'no-force-push', principle: 'Never force push.', agents: 'all', backstop: { on: true, does: 'block', match: { tool: 'Bash', command_matches: '^git\\s+push\\s+--force' } } },
+    { id: 'kind', principle: 'Be kind.', agents: 'all' },
+  ] });
+  assert.equal(f.decide('git push --force origin feat/x'), 'deny', 'precondition');
+  await f.editor.install('gary');
+  const g = JSON.parse(fs.readFileSync(f.file, 'utf8'));
+  assert.deepEqual(g.rules.map((r) => r.id), ['bitbucket-merge', 'protected-branch-push', 'no-force-push', 'remote-push', 'watch', 'kind']);
+  assert.equal(f.decide('git push --force origin feat/x'), 'deny', 'still blocked after install');
+  assert.equal(f.decide('git push origin feat/x'), 'ask');
+});
