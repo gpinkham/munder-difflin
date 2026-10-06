@@ -41,6 +41,14 @@ The status line at the top of Settings -> General and of the Rules screen says
 - A push in the approvable form, with no approval, is refused at once and put on the
   Approvals card; the agent ends its turn and reruns the same command after Approve.
   The approved push is explicitly allowed (no prompt, whatever the permission mode).
+- An agent's commands run in a sandbox whose network check is a prompt of its own, so
+  the approved push runs outside the sandbox. What runs is rebuilt from the approval,
+  `git -C <repo> push <approved url> <sha>:<ref>`, never the agent's text. Anything
+  git runs for that push (the repo's pre-push hook, for one) runs outside it too.
+  The push stays in the sandbox, and the network prompt can come back, when an
+  insteadOf or pushInsteadOf rule matches the URL or the repo cannot be placed.
+- Pushed by URL, the push does not update the agent's remote-tracking ref (and drops
+  `-u`): `git status` can look behind until the next `git fetch`.
 - Another form of the push to the same remote, while an approval is waiting or
   unused, is refused with the exact approved command. A push elsewhere asks as usual.
 - An approval works once (the identical retry within 10 minutes is allowed) and
