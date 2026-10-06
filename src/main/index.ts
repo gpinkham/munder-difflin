@@ -3944,6 +3944,7 @@ hive.setCaptureToolFailures(() => hookServer.reportCheckActive());
 hive.setApprovalHandler((agentId, msg) => hookServer.handleApprovalRequest(agentId, msg));
 hive.setGrantsActive(() => hookServer.grantsActive());
 ipcMain.handle('policy:grantsActive', () => hookServer.grantsActive());
+ipcMain.handle('policy:rules', () => hookServer.policyRules());
 ipcMain.handle('policy:pendingGrants', () => hookServer.pendingGrants());
 ipcMain.handle('policy:decideGrant', (_e, requestId: unknown, approve: unknown) =>
   typeof requestId === 'string' ? hookServer.decideGrant(requestId, approve === true) : { ok: false, error: 'bad request id' });

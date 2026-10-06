@@ -286,6 +286,12 @@ export class HookServer {
   }
 
   /** Current guardrail status, for fleet.json. Null when no hive is configured. */
+  /** The enforced rules for the Rules panel; empty when there is no hive or policy. */
+  policyRules(): ReturnType<PolicyEngine['enforcedRules']> {
+    if (!this.hive.root()) return [];
+    try { return this.policyEngine().enforcedRules(); } catch { return []; }
+  }
+
   policyStatus(): PolicyStatus | null {
     if (!this.hive.root()) return null;
     try { return this.policyEngine().status; } catch { return null; }

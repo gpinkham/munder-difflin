@@ -64,6 +64,39 @@ const label: CSSProperties = { fontSize: 11, opacity: 0.75, textTransform: 'uppe
 const box: CSSProperties = { border: '1px solid rgba(128,128,128,0.35)', borderRadius: 4, padding: 10 };
 const input: CSSProperties = { width: '100%', padding: '6px 8px', fontFamily: 'inherit', fontSize: 12 };
 
+/**
+ * The rules the hook ENFORCES (policy/engine.json), read-only. They are a different
+ * thing from the rules below, which are text delivered to agents (rules.json), and
+ * until 2026-10-06 they had no screen: the panel was empty while a push rule was live.
+ * Edited in engine.json and read at startup, so this view never writes.
+ */
+function EnforcedRules() {
+  const [rules, setRules] = useState<Awaited<ReturnType<typeof window.cth.policyRules>> | null>(null);
+  useEffect(() => {
+    window.cth.policyRules().then(setRules, () => setRules([]));
+  }, []);
+  if (!rules) return null;
+  const what = (r: { decision: string; mode: string; grantable: string[] }): string =>
+    r.mode === 'dry_run' ? 'logs only (dry run)'
+      : r.decision === 'deny' ? 'blocks'
+      : r.grantable.length ? 'needs your approval (Approvals card)' : 'asks in the terminal';
+  return (
+    <div style={{ ...box, fontSize: 12, lineHeight: 1.5 }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>Enforced by the hook ({rules.length})</div>
+      {rules.length === 0
+        ? <div>No enforced rules. They live in <code>&lt;harnessHome&gt;/hive/policy/engine.json</code> and are read when the app starts.</div>
+        : (
+          <ul style={{ margin: 0, paddingLeft: 16 }}>
+            {rules.map((r) => (
+              <li key={r.id}><code>{r.id}</code>: {what(r)}. {r.reason}</li>
+            ))}
+          </ul>
+        )}
+      <div style={{ opacity: 0.7, marginTop: 6 }}>Read-only here. Edit engine.json, then restart the app.</div>
+    </div>
+  );
+}
+
 export function RulesPanel() {
   const agents = useStore((s) => s.agents);
   const [ov, setOv] = useState<Overview | null>(null);
@@ -169,11 +202,14 @@ export function RulesPanel() {
   }
   if (!ov.active) {
     return (
-      <div style={{ ...box, fontSize: 12, lineHeight: 1.5 }}>
-        <div style={{ fontWeight: 600, marginBottom: 6 }}>Rules are not set up for this hive.</div>
-        Create <code>&lt;harnessHome&gt;/hive/policy/rules.json</code> with{' '}
-        <code>{'{ "rev": 1, "rules": [] }'}</code> to switch this on. Until then nothing is
-        rendered, logged or delivered — the feature is dormant.
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <EnforcedRules />
+        <div style={{ ...box, fontSize: 12, lineHeight: 1.5 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Rules for agents are not set up for this hive.</div>
+          Create <code>&lt;harnessHome&gt;/hive/policy/rules.json</code> with{' '}
+          <code>{'{ "rev": 1, "rules": [] }'}</code> to switch this on. Until then nothing is
+          rendered, logged or delivered — the feature is dormant.
+        </div>
       </div>
     );
   }
@@ -185,6 +221,7 @@ export function RulesPanel() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <EnforcedRules />
       <div style={{ ...row, justifyContent: 'space-between' }}>
         <div style={{ fontSize: 12 }}>
           <strong>rev {ov.rev}</strong> · {active.length} active rule{active.length === 1 ? '' : 's'}

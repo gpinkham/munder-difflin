@@ -550,6 +550,15 @@ export class PolicyEngine {
     };
   }
 
+  /** The loaded rules as the Rules panel shows them (read-only), in evaluation order.
+   *  Nothing when no policy file is configured or it failed to load. */
+  enforcedRules(): Array<{ id: string; decision: string; mode: PolicyMode; grantable: string[]; reason: string }> {
+    return this.rules.map((r) => ({
+      id: r.id, decision: r.decision, mode: r.mode ?? this.defaults.mode,
+      grantable: Array.isArray(r.grantable) ? [...r.grantable] : [], reason: r.reason,
+    }));
+  }
+
   /** Reason a rule is unusable, or null. Rejected at load, never at evaluation. */
   private validate(rule: PolicyRule): string | null {
     if (!rule || typeof rule !== 'object') return 'not an object';
