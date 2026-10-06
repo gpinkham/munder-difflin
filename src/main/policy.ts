@@ -292,6 +292,9 @@ export interface PolicyVerdict {
    *  prompt opens (a grant is used on a later call, so it could never answer one).
    *  The daemon raises the approval card; the agent retries after Approve. */
   approvalNeeded?: true;
+  /** Live and grantable, but no grant could cover this form (`git push`, force, …).
+   *  The daemon may refuse it with the exact approved command instead of asking. */
+  notApprovable?: true;
 }
 
 /**
@@ -797,7 +800,7 @@ export class PolicyEngine {
       // on a LATER call, so Approve could never answer that prompt.
       const verdict: PolicyVerdict = approvable
         ? { decision: 'deny', ruleId: rule.id, reason: rule.reason, mode, matchedOn: hit, approvalNeeded: true }
-        : { decision: rule.decision, ruleId: rule.id, reason: rule.reason, mode, matchedOn: hit };
+        : { decision: rule.decision, ruleId: rule.id, reason: rule.reason, mode, matchedOn: hit, ...(rule.grantable ? { notApprovable: true as const } : {}) };
       this.record(p, verdict, ctx);
       return verdict;
     }

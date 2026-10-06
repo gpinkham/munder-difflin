@@ -342,7 +342,8 @@ function gitRepo(t) {
 const hook = (f, command, cwd) => f.server.handle({
   agent_id: 'jim-1', session_id: 's1', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, cwd,
 });
-const decisionOf = (out) => out?.hookSpecificOutput?.permissionDecision ?? 'allow';
+/** The hook's own decision; `none` leaves it to Claude Code's permission mode. */
+const decisionOf = (out) => out?.hookSpecificOutput?.permissionDecision ?? 'none';
 
 test('on: a push with no grant is denied, raises its own Approvals card once, and runs after Approve', async (t) => {
   const origin = gitRepo(t);
@@ -357,13 +358,18 @@ test('on: a push with no grant is denied, raises its own Approvals card once, an
   const why = out.hookSpecificOutput.permissionDecisionReason;
   assert.match(why, new RegExp(p.id), 'the agent is told which request');
   assert.match(why, /Approved/);
-  assert.match(why, /same command/);
+  assert.ok(why.includes(PUSH), 'the exact command to run after Approve');
   assert.equal(f.server.awaitingPolicyAnswer('jim-1'), false, 'no prompt, so no prompt hold and no prompt card');
   assert.ok(f.inbox('god-1').some((m) => /waiting on the operator/.test(m.subject)));
   assert.equal(decisionOf(await hook(f, PUSH, origin)), 'deny', 'a retry before Approve');
   assert.equal(f.server.pendingGrants().length, 1, 'a retry adds no second card');
   assert.equal(f.server.decideGrant(p.id, true).ok, true);
-  assert.equal(decisionOf(await hook(f, PUSH, origin)), 'allow', 'the retry after Approve runs');
+  // Day job 2026-10-06: the granted retry returned no decision, so an agent not in
+  // bypassPermissions got Claude Code's own prompt AFTER Approve. The grant IS the
+  // operator's yes: say allow.
+  const granted = await hook(f, PUSH, origin);
+  assert.equal(decisionOf(granted), 'allow', 'the retry after Approve runs, whatever the permission mode');
+  assert.match(granted.hookSpecificOutput.permissionDecisionReason, /approved by the operator/i);
   assert.match(f.log(), /"kind":"grant-requested"[^\n]*"via":"hook"/);
 });
 
@@ -376,6 +382,37 @@ test('on: an approval-request sent first is the card; the push before Approve ad
   assert.equal(decisionOf(out), 'deny');
   assert.match(out.hookSpecificOutput.permissionDecisionReason, new RegExp(p.id));
   assert.equal(f.server.pendingGrants().length, 1);
+});
+
+// Agents often retry with a shorter form ('git push', 'git push origin feat/x'). No
+// grant can cover that, and an ask would open the prompt again; while this agent has
+// a request waiting or an approved push unused, it is refused and given the exact
+// approved command instead.
+test('on: another push form while a request waits or a grant is open is refused with the exact command', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  await hook(f, PUSH, origin);
+  const [p] = f.server.pendingGrants();
+  const waiting = await hook(f, 'git push', origin);
+  assert.equal(decisionOf(waiting), 'deny', 'pending: no prompt');
+  assert.match(waiting.hookSpecificOutput.permissionDecisionReason, new RegExp(p.id));
+  assert.ok(waiting.hookSpecificOutput.permissionDecisionReason.includes(PUSH));
+  f.server.decideGrant(p.id, true);
+  for (const other of ['git push', 'git push origin feat/x', `git push origin HEAD:refs/heads/feat/x`]) {
+    const out = await hook(f, other, origin);
+    assert.equal(decisionOf(out), 'deny', other);
+    assert.ok(out.hookSpecificOutput.permissionDecisionReason.includes(PUSH), `${other}: names the approved command`);
+  }
+  assert.equal(f.server.awaitingPolicyAnswer('jim-1'), false, 'no prompt was opened');
+  assert.match(f.log(), /"kind":"grant-form-refused"[^\n]*"state":"approved"/);
+  assert.equal(decisionOf(await hook(f, PUSH, origin)), 'allow', 'the grant was not spent by the refusals');
+  assert.equal(f.server.pendingGrants().length, 0);
+});
+
+test('on: with nothing waiting or approved, another push form still asks', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  assert.equal(decisionOf(await hook(f, 'git push', origin)), 'ask');
 });
 
 test('on: a push no grant can cover still opens the terminal prompt', async (t) => {

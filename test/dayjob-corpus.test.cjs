@@ -56,9 +56,10 @@ async function floor(t, config) {
 async function exercise(f) {
   const push = `git push origin ${SHA}:refs/heads/secret-branch-name`;
   await f.fire({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'rm -rf /tmp/x' } });           // deny
-  await f.fire({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: push } });                     // deny: approval needed (card)
-  await f.fire({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'git push origin secret-branch-name' } }); // ask: not approvable
+  await f.fire({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'git push origin secret-branch-name' } }); // ask: not approvable, nothing open
   await f.fire({ hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Claude needs your permission' }); // prompt alert
+  await f.fire({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'git push origin secret-branch-name' } }); // answered
+  await f.fire({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: push } });                     // deny: approval needed (card)
   await f.fire({ hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_input: { command: 'npm test' }, error: 'Exit code 1\nSECRET_RUN_OUTPUT\n# fail 2' });
   f.hive.send({ to: 'god', act: 'inform', subject: 'Done', body: 'Suite green. SECRET_REPORT_BODY' }, 'jim-1');  // report-check flag
   fs.writeFileSync(path.join(f.home, 'hive', 'agents', 'jim-1', 'outbox', 'req.json'),
@@ -74,8 +75,8 @@ test('with the corpus on, only policy decisions reach it, and no new row kind or
   await exercise(f);
   const rows = f.corpus().trim().split('\n').map((l) => JSON.parse(l));
   assert.deepEqual([...new Set(rows.map((r) => r.kind))], ['policy-decision-corpus']);
-  assert.deepEqual(rows.map((r) => r.decision), ['deny', 'deny', 'ask', 'allow']);
-  assert.deepEqual(rows.map((r) => r.approval_needed), [false, true, false, false], 'a push waiting on Approve is not a real deny');
+  assert.deepEqual(rows.map((r) => r.decision), ['deny', 'ask', 'deny', 'allow']);
+  assert.deepEqual(rows.map((r) => r.approval_needed), [false, false, true, false], 'a push waiting on Approve is not a real deny');
   const log = fs.readFileSync(path.join(f.home, 'hive', 'log.jsonl'), 'utf8');
   for (const kind of ['report-check-outcome', 'report-check-flag', 'policy-prompt-waiting', 'grant-requested', 'grant-decided'])
     assert.match(log, new RegExp(`"kind":"${kind}"`), `${kind} was written to the ledger, so the test exercised it`);

@@ -270,6 +270,23 @@ export class GrantDesk {
     const request = this.pendingById.get(requestId);
     if (!request) return null;
     this.pendingById.delete(requestId);
-    return { request, grant: approve ? this.store.mint(request, now) : null };
+    const grant = approve ? this.store.mint(request, now) : null;
+    if (grant) this.approved.push({ grant, command: request.command });
+    return { request, grant };
+  }
+
+  /** Approved commands, in order, so a retry in another form can be told the exact one. */
+  private approved: Array<{ grant: Grant; command: string }> = [];
+
+  /** The push this agent may run now (approved, and its grant still usable) or is
+   *  waiting on, newest first. Main's own copy of the command, never the agent's. */
+  openFor(agentId: string, now = Date.now()): { state: 'approved' | 'pending'; id: string; command: string } | null {
+    for (const a of [...this.approved].reverse()) {
+      if (a.grant.agent_id !== agentId) continue;
+      const action = { class: a.grant.class, target: a.grant.target, summary: '' };
+      if (this.store.findUsable(agentId, action, now)) return { state: 'approved', id: a.grant.id, command: a.command };
+    }
+    const q = [...this.pendingById.values()].reverse().find((r) => r.agent_id === agentId);
+    return q ? { state: 'pending', id: q.id, command: q.command } : null;
   }
 }
