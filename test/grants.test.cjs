@@ -409,6 +409,15 @@ test('on: another push form while a request waits or a grant is open is refused 
   assert.equal(f.server.pendingGrants().length, 0);
 });
 
+test('dry_run: a noted grant never becomes an explicit allow', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [{ ...PUSH_RULE, mode: 'dry_run' }] });
+  f.drop({ ...REQUEST, cwd: origin });
+  const [p] = f.server.pendingGrants();
+  f.server.decideGrant(p.id, true);
+  assert.equal(decisionOf(await hook(f, PUSH, origin)), 'none', 'dry_run leaves the permission mode in charge');
+});
+
 test('on: with nothing waiting or approved, another push form still asks', async (t) => {
   const origin = gitRepo(t);
   const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
