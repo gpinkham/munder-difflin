@@ -454,6 +454,19 @@ The approvable form is one Bash call: git [-C <dir>] push <remote> <40-char sha>
     return true;
   }
 
+  /** What to tell an agent that tried another push form while one is waiting or
+   *  approved for it, or null when it has none (then the rule asks as usual). */
+  private openApproval(agentId: string): string | null {
+    try {
+      const o = this.grantDesk()?.openFor(agentId);
+      if (!o) return null;
+      this.hive.appendLog({ kind: 'grant-form-refused', agent_id: agentId, state: o.state, id: o.id } as Parameters<HiveManager['appendLog']>[0]);
+      return o.state === 'approved'
+        ? `Not run: no approval covers this form. Your approved push (grant ${o.id}) is exactly this, as one Bash call, in the same directory: ${o.command}`
+        : `Not run: request ${o.id} is still waiting for the operator. End your turn; after "Approved", run exactly this, as one Bash call: ${o.command}`;
+    } catch { return null; }
+  }
+
   /** A new request is on the Approvals card: log it, tell god, alert the operator. */
   private announceRequest(agentId: string, q: GrantRequest, via: 'outbox' | 'hook'): void {
     this.hive.appendLog({
@@ -480,7 +493,8 @@ The approvable form is one Bash call: git [-C <dir>] push <remote> <40-char sha>
       const r = desk?.request(agentId, { command: input.command, cwd: p.cwd, reason: 'Raised by the push itself.' });
       if (r?.ok) {
         if (r.fresh) this.announceRequest(agentId, r.request, 'hook');
-        return `Not run: this push needs the operator's approval. Request ${r.request.id} is on the Approvals card in ASK ME. End your turn and wait. When a message says "Approved", run exactly the same command again as one Bash call; if it says "Denied", do not push.`;
+        return `Not run: this push needs the operator's approval. Request ${r.request.id} is on the Approvals card in ASK ME. End your turn and wait. When a message says "Approved", run exactly this, as one Bash call, in the same directory: ${r.request.command}
+If it says "Denied", do not push.`;
       }
     } catch { /* never break a hook */ }
     return 'Not run: this push needs the operator\'s approval. Send an approval-request outbox message for exactly this command, end your turn, and run it again only after a message says "Approved".';
@@ -504,7 +518,7 @@ The approvable form is one Bash call: git [-C <dir>] push <remote> <40-char sha>
     this.hive.send(grant
       ? {
         to: q.agent_id, act: 'agree', subject: `Approved: ${q.action.summary}`,
-        body: `Grant ${grant.id}. Run exactly this, as one Bash call, before ${grant.expires_at}:\n${q.command}\nIt works once; the identical command may be retried within 10 minutes of the first run. Any other push still asks.`,
+        body: `Grant ${grant.id}. Run exactly this, as one Bash call, before ${grant.expires_at}:\n${q.command}\nIt works once; the identical command may be retried within 10 minutes of the first run. Any other form of the push is refused; any other push needs its own approval.`,
       }
       : {
         to: q.agent_id, act: 'refuse', subject: `Denied: ${q.action.summary}`,
@@ -717,15 +731,34 @@ The approvable form is one Bash call: git [-C <dir>] push <remote> <40-char sha>
           // without it, and the daemon's own cwd is not where the agent is standing.
           cwd: p.cwd
         });
+        if (v.grantId && v.decision === 'allow') {
+          // The operator's Approve IS the permission. Without an explicit allow an agent
+          // that is not in bypassPermissions stops at Claude Code's own prompt for the
+          // very push that was approved (day job, 2026-10-06).
+          this.emit(agentId, event, p);
+          return {
+            hookSpecificOutput: {
+              hookEventName: 'PreToolUse',
+              permissionDecision: 'allow',
+              permissionDecisionReason: `[policy:${v.ruleId}] Approved by the operator (grant ${v.grantId}).`
+            }
+          };
+        }
+        // Another push form while this agent has a push waiting or approved: no grant can
+        // cover it and an ask would open the prompt again, so refuse it and name the
+        // exact approved command.
+        const open = v.notApprovable && agentId ? this.openApproval(agentId) : null;
         if (v.decision !== 'allow') {
-          if (v.decision === 'ask' && agentId && v.ruleId) this.policyAsks.set(agentId, { ruleId: v.ruleId, at: Date.now() });
+          const decision = open ? 'deny' : v.decision;
+          if (decision === 'ask' && agentId && v.ruleId) this.policyAsks.set(agentId, { ruleId: v.ruleId, at: Date.now() });
           const why = `[policy:${v.ruleId}] ${v.reason ?? 'Denied by policy.'}`;
           this.emit(agentId, event, p);
           return {
             hookSpecificOutput: {
               hookEventName: 'PreToolUse',
-              permissionDecision: v.decision,
-              permissionDecisionReason: v.approvalNeeded && agentId ? `${why} ${this.approvalNeeded(agentId, p)}` : why
+              permissionDecision: decision,
+              permissionDecisionReason: open ? `${why} ${open}`
+                : v.approvalNeeded && agentId ? `${why} ${this.approvalNeeded(agentId, p)}` : why
             }
           };
         }
