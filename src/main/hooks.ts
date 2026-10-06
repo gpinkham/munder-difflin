@@ -312,6 +312,13 @@ export class HookServer {
     } catch { return {}; }
   }
 
+  /** True while this agent has a push on the Approvals card or an approval not yet
+   *  spent: it waits on the operator, not idle (finish plan item 7). Bounded: a
+   *  request expires after 60 minutes, an approval when its grant can't be used. */
+  awaitingApproval(agentId: string, now = Date.now()): boolean {
+    try { return !!this.grantDesk()?.openFor(agentId, now); } catch { return false; }
+  }
+
   /** Re-read guardrail.json after the Rules screen saved it: an explicit operator
    *  action, so it takes effect now instead of at the next start. */
   reloadPolicy(): PolicyStatus | null {

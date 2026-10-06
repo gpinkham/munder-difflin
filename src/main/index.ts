@@ -5055,6 +5055,9 @@ async function ephemeralWorkerTick(): Promise<void> {
           continue;
         }
       }
+      // Finish plan item 7: a worker waiting on an Approvals card waits on the operator,
+      // not idle. Kept until the request is decided or expires (60 min).
+      if (hookServer.awaitingApproval(workerId)) continue;
       const idleMs = ptyManager.idleFor(workerId);
       if (idleMs === undefined) continue; // PTY already gone; teardownPty cleans up
       if (idleMs > idleTimeoutMs) {

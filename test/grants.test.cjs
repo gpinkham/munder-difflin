@@ -564,3 +564,26 @@ test('a push whose push URL differs from the fetch URL is flagged on the card', 
   assert.equal(plain.request.fetch_url, undefined, 'the same URL: no flag');
   assert.equal(describeGrant(plain.request).facts.some(([k]) => k === 'Warning'), false);
 });
+
+// --- Finish plan item 7: a temp waiting on a card is not reaped for being idle --------
+
+test('awaitingApproval: true while a request waits or an approval is unused, false after', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  assert.equal(f.server.awaitingApproval('jim-1'), false);
+  await hook(f, PUSH, origin);
+  assert.equal(f.server.awaitingApproval('jim-1'), true, 'on the card');
+  const [p] = f.server.pendingGrants();
+  f.server.decideGrant(p.id, true);
+  assert.equal(f.server.awaitingApproval('jim-1'), true, 'approved, not yet run');
+  assert.equal(f.server.awaitingApproval('pam-1'), false, 'another agent');
+  await hook(f, PUSH, origin);
+  const later = Date.now() + 11 * 60_000;
+  assert.equal(f.server.awaitingApproval('jim-1', later), false, 'run, and past the retry window');
+});
+
+test('the worker reaper skips a worker that is waiting on an approval', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
+  const loop = main.slice(main.indexOf('async function ephemeralWorkerTick'), main.indexOf('if (idleMs > idleTimeoutMs)'));
+  assert.match(loop, /if \(hookServer\.awaitingApproval\(workerId\)\) continue;/);
+});
