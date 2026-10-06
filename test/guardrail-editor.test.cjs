@@ -140,3 +140,52 @@ test('test: would this backstop stop a command, for which agent', async (t) => {
   assert.match(f.editor.test({ ...PUSH, backstop: { ...b, match: { tool: 'Bash', command_matches: '(' } } }, 'git push').error, /./);
   assert.match(f.editor.test({ id: 'p', principle: 'x', agents: 'all' }, 'git push').error, /no backstop/);
 });
+
+// --- Dwight's review of items 1+2 ------------------------------------------------------
+
+test('M1: a save over a broken file is refused, and the broken file is left for repair', async (t) => {
+  const f = await floor(t, { version: 1, rev: 2, rules: [PUSH] });
+  fs.writeFileSync(f.file, '{ "version": 1, "rev": 2, "rules": [ { "id": "x" } ] }');
+  const view = f.editor.read();
+  assert.equal(view.file, null);
+  assert.ok(view.error);
+  const out = await f.editor.save({ version: 1, rev: 0, rules: [PUSH] }, view.stamp, 'gary');
+  assert.deepEqual([out.ok, out.reason], [false, 'broken-file']);
+  assert.match(out.errors.join(' '), /broken/);
+  assert.match(fs.readFileSync(f.file, 'utf8'), /"id": "x"/, 'not replaced');
+  const panel = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/src/components/RulesPanel.tsx'), 'utf8');
+  assert.match(panel, /const locked = !!view\?\.error;/, 'the screen knows the file is broken');
+  assert.match(panel, /\+ Add rule[\s\S]{0,40}|disabled=\{busy \|\| !!draft \|\| !view \|\| locked\}/);
+});
+
+test('M2: over the cap, a save that does not make it worse goes through; one that does is refused', async (t) => {
+  const many = Array.from({ length: 13 }, (_, i) => ({ id: `r${i}`, principle: `Rule number ${i}.`, agents: 'all' }));
+  const f = await floor(t, { version: 1, rev: 1, rules: many });
+  let v = f.editor.read();
+  assert.ok(v.caps.over.includes('global'), 'precondition: already over');
+  let out = await f.editor.save({ ...v.file, rules: many.slice(1) }, v.stamp, 'gary');
+  assert.equal(out.ok, true, 'a delete always works');
+  v = f.editor.read();
+  out = await f.editor.save({ ...v.file, rules: v.file.rules.map((r) => (r.id === 'r1' ? { ...r, backstop: { on: true, does: 'block', match: { tool: 'Bash', command_matches: '^x' } } } : r)) }, v.stamp, 'gary');
+  assert.equal(out.ok, true, 'adding a backstop does not change the principles');
+  v = f.editor.read();
+  out = await f.editor.save({ ...v.file, rules: [...v.file.rules, { id: 'more', principle: 'One more.', agents: 'all' }] }, v.stamp, 'gary');
+  assert.equal(out.ok, false, 'adding a principle while over is refused');
+  out = await f.editor.save({ ...v.file, rules: v.file.rules.map((r) => (r.id === 'r2' ? { ...r, principle: `${r.principle} And a much longer sentence than before, which costs more tokens.` } : r)) }, v.stamp, 'gary');
+  assert.equal(out.ok, false, 'a longer principle while over is refused');
+});
+
+test('L1: deleting every rule saves, and the engine loads it as nothing enforced', async (t) => {
+  const f = await floor(t, { version: 1, rev: 1, rules: [PUSH] });
+  const v = f.editor.read();
+  const out = await f.editor.save({ ...v.file, rules: [] }, v.stamp, 'gary');
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.deepEqual([out.status.error, out.status.rulesLoaded, out.status.configured], [null, 0, true]);
+});
+
+test('L5: the saved row says when report_check or the defaults changed', async (t) => {
+  const f = await floor(t, { version: 1, rev: 1, rules: [PUSH] });
+  const v = f.editor.read();
+  await f.editor.save({ ...v.file, report_check: { mode: 'live' }, defaults: { on_error: 'deny' } }, v.stamp, 'gary');
+  assert.match(f.log(), /"kind":"guardrail-saved"[^\n]*"report_check_changed":true[^\n]*"defaults_changed":true/);
+});

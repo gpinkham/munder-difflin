@@ -299,19 +299,29 @@ export class HookServer {
   /** A payload that names an agent without its token: enforce, but do nothing in the
    *  agent's name (no card, no approval used, no alert, no event, no inbox). */
   private unauthenticated(agentId: string, event: string, p: HookPayload): unknown {
-    const now = Date.now();
-    if (now - (this.unauthLogged.get(agentId) ?? 0) > 10 * 60_000) {
-      this.unauthLogged.set(agentId, now);
-      this.hive.appendLog({ kind: 'hook-unauthenticated', agent_id: agentId, event } as Parameters<HiveManager['appendLog']>[0]);
+    let decision: string | null = null;
+    let out: unknown = {};
+    if (event === 'PreToolUse') {
+      try {
+        const policy = this.policyEngine();
+        if (policy.active) {
+          // No decision or corpus row under the claimed agent (Dwight L7): the refusal
+          // is recorded below, as unauthenticated.
+          const v = policy.evaluate({ hook_event_name: event, agent_id: agentId, tool_name: p.tool_name, tool_input: p.tool_input, cwd: p.cwd }, { grants: false, record: false });
+          decision = v.decision;
+          if (v.decision !== 'allow') {
+            out = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: v.decision, permissionDecisionReason: `[policy:${v.ruleId}] ${v.reason ?? 'Denied by policy.'}` } };
+          }
+        }
+      } catch { out = {}; }
     }
-    if (event !== 'PreToolUse') return {};
-    try {
-      const policy = this.policyEngine();
-      if (!policy.active) return {};
-      const v = policy.evaluate({ hook_event_name: event, agent_id: agentId, tool_name: p.tool_name, tool_input: p.tool_input, cwd: p.cwd }, { grants: false });
-      if (v.decision === 'allow') return {};
-      return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: v.decision, permissionDecisionReason: `[policy:${v.ruleId}] ${v.reason ?? 'Denied by policy.'}` } };
-    } catch { return {}; }
+    // Every refusal is logged; an allow or another event once per agent per 10 minutes.
+    const now = Date.now();
+    if ((decision && decision !== 'allow') || now - (this.unauthLogged.get(agentId) ?? 0) > 10 * 60_000) {
+      this.unauthLogged.set(agentId, now);
+      this.hive.appendLog({ kind: 'hook-unauthenticated', agent_id: agentId, event, ...(decision ? { decision } : {}) } as Parameters<HiveManager['appendLog']>[0]);
+    }
+    return out;
   }
 
   /** True while this agent has a push on the Approvals card or an approval not yet
@@ -329,8 +339,10 @@ export class HookServer {
     e.load();
     // The approvals desk follows the rules: on when some backstop asks with approve on
     // a card. Pending requests survive a reload while it stays on.
-    if (!e.grantsActive) this.desk = null;
-    else if (!this.desk) this.desk = undefined;
+    if (!e.grantsActive) {
+      try { this.desk?.dropPending('approvals-off'); } catch { /* the desk goes either way */ }
+      this.desk = null;
+    } else if (!this.desk) this.desk = undefined;
     return e.status;
   }
 
@@ -466,7 +478,9 @@ export class HookServer {
   private grantDesk(): GrantDesk | null {
     if (this.desk === undefined) {
       const root = this.hive.root();
-      this.desk = root && this.policyEngine().grantsActive ? new GrantDesk(GrantStore.in(join(root, 'policy'))) : null;
+      this.desk = root && this.policyEngine().grantsActive
+        ? new GrantDesk(GrantStore.in(join(root, 'policy')), undefined, (q, why) => this.requestDropped(q, why))
+        : null;
     }
     return this.desk;
   }
@@ -537,6 +551,19 @@ The approvable form is one Bash call: git [-C <dir>] push <remote> <40-char sha>
         ? `Not run: no approval covers this push. Your approved push (grant ${o.id}) is exactly this, as one Bash call, ${where}: ${o.command}\nAny other push needs its own approval.`
         : `Not run: request ${o.id} is still waiting for the operator. End your turn; after "Approved", run exactly this, as one Bash call, ${where}: ${o.command}`;
     } catch { return null; }
+  }
+
+  /** A request left the card without the operator's decision: tell the agent waiting
+   *  on it, so it does not wait for an answer that will never come (Dwight L3, L8). */
+  private requestDropped(q: GrantRequest, why: 'expired' | 'approvals-off'): void {
+    this.hive.appendLog({ kind: 'grant-request-dropped', request_id: q.id, agent_id: q.agent_id, why } as Parameters<HiveManager['appendLog']>[0]);
+    this.hive.send({
+      to: q.agent_id, act: 'refuse', subject: `Approval request ${q.id} dropped`,
+      body: why === 'expired'
+        ? `Request ${q.id} waited 60 minutes with no decision and expired. If you still need the push, run it again to put it on a new card.`
+        : `Approvals were turned off in the rules, so request ${q.id} will not be decided. The push now asks in the terminal.`,
+    }, GRANT_DESK_SENDER);
+    this.getWebContents()?.send('policy:grantsChanged');
   }
 
   /** A new request is on the Approvals card: log it, tell god, alert the operator. */

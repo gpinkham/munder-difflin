@@ -266,7 +266,12 @@ export class GrantDesk {
 
   /** Loads what was waiting or approved before a restart (finish plan item 3). A torn
    *  file starts empty: nothing is approved by a file the desk cannot read. */
-  constructor(private store: GrantStore, private inspect: GitInspector = gitInspector) {
+  constructor(
+    private store: GrantStore,
+    private inspect: GitInspector = gitInspector,
+    /** Told about every request dropped without the operator's decision (Dwight L8). */
+    private onDrop: (request: GrantRequest, why: 'expired' | 'approvals-off') => void = () => {},
+  ) {
     this.statePath = join(store.dir, GRANT_DESK_FILE);
     try {
       if (existsSync(this.statePath)) {
@@ -294,9 +299,22 @@ export class GrantDesk {
     const held = this.denied.filter((d) => now - Date.parse(d.at) < GRANT_DENY_HOLD_MS);
     if (held.length !== this.denied.length) { this.denied = held; changed = true; }
     for (const [id, q] of this.pendingById) {
-      if (!(now - Date.parse(q.requested_at) < GRANT_TTL_MS)) { this.pendingById.delete(id); changed = true; }
+      if (!(now - Date.parse(q.requested_at) < GRANT_TTL_MS)) {
+        this.pendingById.delete(id);
+        changed = true;
+        try { this.onDrop(q, 'expired'); } catch { /* telling must never break the desk */ }
+      }
     }
     if (changed) this.persist();
+  }
+
+  /** Approvals were turned off: drop every waiting request and say so (Dwight L3). */
+  dropPending(why: 'approvals-off'): void {
+    const all = [...this.pendingById.values()];
+    if (!all.length) return;
+    this.pendingById.clear();
+    this.persist();
+    for (const q of all) { try { this.onDrop(q, why); } catch { /* as above */ } }
   }
 
   /** A new pending request, or the one already waiting for this agent's exact action
@@ -372,8 +390,12 @@ export class GrantDesk {
 
   /** The repo and remote of `git [-C dir] push [flags] [remote] …`, or null. */
   private remoteOf(command: string, cwd: string | null): { dir: string; remote: string } | null {
+    // Dwight L6: a second line, or a git dir chosen by flag, is a push this cannot
+    // place; such a command is never refused here (it asks as usual).
+    if (/[\r\n]/.test(command.trim())) return null;
     const toks = command.trim().split(/\s+/);
     if (toks[0] !== 'git') return null;
+    if (toks.some((t) => /^--(git-dir|work-tree)(=|$)/.test(t))) return null;
     let dir = cwd;
     let i = 1;
     while (i < toks.length && toks[i] !== 'push') {

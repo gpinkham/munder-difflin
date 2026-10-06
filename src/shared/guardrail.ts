@@ -37,6 +37,8 @@ export interface GuardrailRule {
   /** 'all', or the agent ids the principle (and its backstop) apply to. */
   agents: 'all' | string[];
   why?: string;
+  /** Notes carried over from the old engine.json (`_…_why` fields). Not shown to agents. */
+  notes?: Record<string, string>;
   backstop?: Backstop;
 }
 
@@ -75,6 +77,6 @@ export interface GuardrailView {
 
 export type GuardrailSaveResult =
   | { ok: true; rev: number; stamp: number | null; status: GuardrailStatus | null }
-  | { ok: false; reason: 'invalid' | 'changed-on-disk' | 'no-hive' | 'write-failed'; errors: string[] };
+  | { ok: false; reason: 'invalid' | 'changed-on-disk' | 'broken-file' | 'no-hive' | 'write-failed'; errors: string[] };
 
 export interface GuardrailTestResult { fires: boolean; does?: string; on?: string; error?: string }

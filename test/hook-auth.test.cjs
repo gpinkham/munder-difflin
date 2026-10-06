@@ -160,3 +160,10 @@ test('a subagent\'s hook call reaches the server as its agent, authenticated, an
   assert.deepEqual(seen.find(([, e]) => e === 'PreToolUse'), ['jim-1', 'PreToolUse', 'a1b2c3-explore']);
   assert.doesNotMatch(f.log(), /"kind":"hook-unauthenticated"/);
 });
+
+test('L7: a forged payload leaves no decision row under the agent it names', async (t) => {
+  const f = await floor(t);
+  await f.send('rm -rf /x', 'forged');
+  assert.doesNotMatch(f.log(), /"kind":"policy-decision"[^\n]*"agent_id":"jim-1"/);
+  assert.match(f.log(), /"kind":"hook-unauthenticated"[^\n]*"decision":"deny"/, 'the refusal is still on record, as unauthenticated');
+});

@@ -23,7 +23,9 @@ backstop is shown as "Principle only, not enforced".
 One file, `<hive>/policy/guardrail.json`, edited in **Settings -> Rules**:
 - add, edit, delete, turn a backstop on or off, and "Try it: would this stop a command?";
 - each save is validated by the engine first, refused if the file changed on disk
-  since the screen loaded it, written atomically with a timestamped backup
+  since the screen loaded it or if the file on disk is broken (repair it or restore a
+  backup), refused if it adds principles over the cap (a save that does not make the
+  cap worse, such as a delete, always goes through), written atomically with a timestamped backup
   (`guardrail.json.bak-<time>`, newest 20 kept), and takes effect at once;
 - agents cannot write the policy folder (self-protection), and only the app window saves.
 
@@ -47,19 +49,27 @@ The status line at the top of Settings -> General and of the Rules screen says
 - Waiting requests and approvals survive an app restart (`policy/grant-desk.json`).
 - The card warns when the push goes to a different URL than the remote fetches from.
 - A temp waiting on a card is not shut down for being idle.
+- If a waiting request expires, or approvals are turned off in the rules, the agent
+  is told its request was dropped.
+- Known limit: a plain `git push` whose branch pushes to a remote other than
+  `origin` (branch.<name>.pushRemote, remote.pushDefault) is matched against
+  `origin`, so it can be refused with the exact command when it would have asked.
 
 ## Who may talk to the hook server
 
 Each agent the app starts gets its own token (`HIVE_HOOK_TOKEN`, an HMAC of its id
 under a secret made fresh each run). A hook payload that names an agent without its
 token gets the policy decision only: rules still apply, but nothing happens in the
-agent's name (no card, no approval used, no alert, no event). Limit: a same-user
-process that reads an agent's environment can copy its token.
+agent's name (no card, no approval used, no alert, no event, no decision row; the
+refusal is logged as `hook-unauthenticated`). A subagent's hook call counts as its
+hive agent's (the CLI's own id is kept as `subagent_id`). Limit: a same-user process
+that reads an agent's environment can copy its token.
 
 ## Moving from engine.json / rules.json
 
 The first start of this build moves `policy/engine.json` (backstops) and
 `policy/rules.json` (principles) into `guardrail.json` and renames them
-`*.migrated-<time>`. A rule the engine would refuse is not moved; the old file stays
-and its error is shown. To go back to an older build, restore the renamed files to
+`*.migrated-<time>`. Descriptions and `_…_why` notes are carried. Nothing is dropped
+silently: a rule the engine would refuse, a duplicate id, or a scope that is not all
+agents or a list stops the move, the old files stay, and the error is shown. To go back to an older build, restore the renamed files to
 their old names first: older builds read only `engine.json` and `rules.json`.

@@ -113,14 +113,17 @@ test('a backstop that is off, or for other agents, does not fire; principle-only
   assert.deepEqual(e.status.ruleIds, ['pam-only']);
 });
 
-test('all backstops off loads cleanly as nothing enforced; an empty file is an error', (t) => {
+test('all backstops off, or no rules at all, loads cleanly as nothing enforced; a legacy engine.json with no rules is an error', (t) => {
   const h = home(t);
   put(h, GUARDRAIL_FILE, { version: 1, rev: 1, rules: [{ id: 'text', principle: 'Be kind.', agents: 'all' }] });
   let e = engine(h);
   assert.deepEqual([e.status.configured, e.status.error, e.status.rulesLoaded], [true, null, 0]);
   put(h, GUARDRAIL_FILE, { version: 1, rev: 1, rules: [] });
   e = engine(h);
-  assert.match(e.status.error, /no rules/);
+  assert.deepEqual([e.status.configured, e.status.error, e.status.rulesLoaded], [true, null, 0], 'Dwight L1: deleting every rule is not a broken file');
+  const h2 = home(t);
+  put(h2, 'engine.json', { version: 1, rules: [] });
+  assert.match(engine(h2).status.error, /no rules/, 'a truncated legacy file still fails loudly');
 });
 
 test('validation names the rule and the field', () => {
@@ -189,4 +192,42 @@ test('editing a principle keeps its backstop, bumps rev, and backs the file up',
   assert.equal(g.rules[0].principle, 'Do not push without my approval.');
   assert.deepEqual(g.rules[0].backstop, { on: true, does: 'ask', match: { tool: 'Bash', command_matches: '^git push' } });
   assert.equal(fs.readdirSync(pol(h, '')).filter((f) => f.startsWith(`${GUARDRAIL_FILE}.bak-`)).length, 1);
+});
+
+// --- Dwight's lows on items 1+2 ----------------------------------------------------------
+
+test('L2: a reload resets the defaults, so an old on_error does not stick', (t) => {
+  const h = home(t);
+  put(h, GUARDRAIL_FILE, { version: 1, rev: 1, defaults: { on_error: 'deny' }, rules: [{ id: 'p', principle: 'x', agents: 'all' }] });
+  const e = engine(h);
+  assert.equal(e.defaults.on_error, 'deny');
+  put(h, GUARDRAIL_FILE, { version: 1, rev: 2, rules: [{ id: 'p', principle: 'x', agents: 'all' }] });
+  e.load();
+  assert.equal(e.defaults.on_error, 'allow');
+});
+
+test('L4: migration keeps descriptions and notes, and refuses what it cannot carry instead of dropping it', (t) => {
+  const h = home(t);
+  put(h, 'engine.json', { version: 1, defaults: { mode: 'live' }, rules: [
+    { id: 'no-rm', decision: 'deny', reason: 'No rm.', description: 'Stops rm -rf.', _match_why: 'anchored', match: { tool: 'Bash', command_matches: '^rm\\s' } },
+  ] });
+  migrateLegacyPolicy(pol(h, ''), () => {});
+  const r = get(h, GUARDRAIL_FILE).rules[0];
+  assert.equal(r.why, 'Stops rm -rf.');
+  assert.deepEqual(r.notes, { _match_why: 'anchored' });
+  for (const [what, engineRules, prose, re] of [
+    ['an unknown scope', null, { rev: 1, rules: [{ id: 'r', text: 'x', scope: 'role' }] }, /r: .*scope/],
+    ['duplicate engine ids', [{ id: 'a', decision: 'deny', reason: 'x', match: { tool: 'Bash' } }, { id: 'a', decision: 'deny', reason: 'y', match: { tool: 'Bash' } }], null, /a: duplicate/],
+    ['duplicate prose ids', null, { rev: 1, rules: [{ id: 'b', text: 'x' }, { id: 'b', text: 'y' }] }, /b: duplicate/],
+  ]) {
+    const h2 = home(t);
+    if (engineRules) put(h2, 'engine.json', { version: 1, rules: engineRules });
+    if (prose) put(h2, 'rules.json', prose);
+    const rows = [];
+    const out = migrateLegacyPolicy(pol(h2, ''), (row) => rows.push(row));
+    assert.equal(out.migrated, false, what);
+    assert.match(out.error, re, what);
+    assert.equal(fs.existsSync(pol(h2, GUARDRAIL_FILE)), false, `${what}: nothing written`);
+    assert.ok(rows.some((row) => row.kind === 'guardrail-migration-failed'), what);
+  }
 });

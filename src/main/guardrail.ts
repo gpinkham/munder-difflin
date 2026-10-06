@@ -201,15 +201,39 @@ export function migrateLegacyPolicy(
       return w ? `${(r as { id?: string })?.id ?? '(no id)'}: ${w}` : null;
     }).filter(Boolean);
     if (why.length) return refuse(`${LEGACY_ENGINE_FILE} has rules the engine refuses, so nothing was moved: ${why.join('; ')}`);
+    // An engine.json with no rules is a truncated write or a bad edit, as it always was.
+    if (!(eng.rules ?? []).length) return refuse(`${LEGACY_ENGINE_FILE} has no rules, so nothing was moved: nothing is enforced`);
   }
   const prose = hasProse ? readJson<LegacyProse>(prosePath) : {};
   if (!prose) return refuse(`${LEGACY_PROSE_FILE} does not parse, so nothing was moved`);
   eng = eng ?? {};
+  // Dwight L4: nothing is dropped silently. What cannot be carried stops the move,
+  // with the reason, and both old files stay as they are.
+  const problems: string[] = [];
+  const seenEngine = new Set<string>();
+  for (const r of eng.rules ?? []) {
+    if (r && typeof r.id === 'string') {
+      if (seenEngine.has(r.id)) problems.push(`${r.id}: duplicate id in ${LEGACY_ENGINE_FILE}`);
+      seenEngine.add(r.id);
+    }
+  }
+  const seenProse = new Set<string>();
+  for (const p of prose?.rules ?? []) {
+    if (!p || typeof p.id !== 'string' || p.status === 'retired') continue;
+    if (seenProse.has(p.id)) problems.push(`${p.id}: duplicate id in ${LEGACY_PROSE_FILE}`);
+    seenProse.add(p.id);
+    const s = p.scope as { kind?: string; ids?: unknown } | string | undefined;
+    const carried = s === undefined || s === null || s === 'all' || s === 'global'
+      || (typeof s === 'object' && (s.kind === 'global' || (s.kind === 'agents' && Array.isArray(s.ids))));
+    if (!carried) problems.push(`${p.id}: scope ${JSON.stringify(s)} cannot be carried (use all agents or a list of agents)`);
+  }
+  if (problems.length) return refuse(`nothing was moved: ${problems.join('; ')}`);
   const defaultMode: PolicyMode = eng.defaults?.mode ?? 'dry_run';
   const rules: GuardrailRule[] = [];
   const ids = new Set<string>();
   for (const r of eng.rules ?? []) {
     if (!r || typeof r.id !== 'string') continue;
+    const notes = Object.fromEntries(Object.entries(r).filter(([k, v]) => k.startsWith('_') && typeof v === 'string')) as Record<string, string>;
     const mode = r.mode ?? defaultMode;
     const does: BackstopDoes = mode === 'dry_run' ? 'log' : r.decision === 'ask' ? 'ask' : 'block';
     const reason = typeof r.reason === 'string' ? r.reason : '';
@@ -217,6 +241,8 @@ export function migrateLegacyPolicy(
       id: r.id,
       principle: reason || r.id,
       agents: 'all',
+      ...(typeof r.description === 'string' && r.description ? { why: r.description } : {}),
+      ...(Object.keys(notes).length ? { notes } : {}),
       backstop: {
         on: true, does,
         ...(does === 'ask' && Array.isArray(r.grantable) && r.grantable.length ? { approve_on_card: [...r.grantable] } : {}),
@@ -234,8 +260,7 @@ export function migrateLegacyPolicy(
     const s = p.scope as { kind?: string; ids?: unknown } | string | undefined;
     const agents: 'all' | string[] =
       s === undefined || s === null || s === 'all' || s === 'global' || (typeof s === 'object' && s.kind === 'global') ? 'all'
-        : typeof s === 'object' && s.kind === 'agents' && Array.isArray(s.ids) ? (s.ids as unknown[]).filter((x): x is string => typeof x === 'string')
-          : [];
+        : (((s as { ids?: unknown[] }).ids ?? []) as unknown[]).filter((x): x is string => typeof x === 'string');
     let id = p.id;
     if (ids.has(id)) id = `${id}-principle`;
     ids.add(id);

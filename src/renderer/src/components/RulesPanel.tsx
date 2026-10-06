@@ -55,6 +55,8 @@ export function RulesPanel() {
 
   const rules = view?.file?.rules ?? [];
   const status = statusLine(view);
+  /** Dwight M1: a broken file is not edited here (main refuses too); repair it first. */
+  const locked = !!view?.error;
 
   const save = useCallback(async (nextRules: GuardrailRule[], done: string) => {
     if (!view) return;
@@ -120,7 +122,7 @@ export function RulesPanel() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ ...row, justifyContent: 'space-between' }}>
         <div style={{ fontSize: 12, ...(status.bad || loadErr ? red : {}) }}>{loadErr ?? status.text}</div>
-        <PixelButton variant="primary" size="sm" disabled={busy || !!draft || !view} onClick={() => startEdit(emptyDraft())}>
+        <PixelButton variant="primary" size="sm" disabled={busy || !!draft || !view || locked} onClick={() => startEdit(emptyDraft())}>
           + Add rule
         </PixelButton>
       </div>
@@ -165,12 +167,12 @@ export function RulesPanel() {
             <div style={{ fontSize: 11, opacity: r.backstop?.on === false ? 0.55 : 0.85 }}>{describeBackstop(r)}</div>
             <div style={row}>
               {r.backstop && (
-                <PixelButton variant="secondary" size="sm" disabled={busy || !!draft} onClick={() => toggle(r)}>
+                <PixelButton variant="secondary" size="sm" disabled={busy || !!draft || locked} onClick={() => toggle(r)}>
                   {r.backstop.on ? 'Turn off' : 'Turn on'}
                 </PixelButton>
               )}
-              <PixelButton variant="secondary" size="sm" disabled={busy || !!draft} onClick={() => startEdit(toDraft(r))}>Edit</PixelButton>
-              <PixelButton variant="destructive" size="sm" disabled={busy || !!draft} onClick={() => remove(r)}>Delete</PixelButton>
+              <PixelButton variant="secondary" size="sm" disabled={busy || !!draft || locked} onClick={() => startEdit(toDraft(r))}>Edit</PixelButton>
+              <PixelButton variant="destructive" size="sm" disabled={busy || !!draft || locked} onClick={() => remove(r)}>Delete</PixelButton>
             </div>
           </div>
           {r.agents !== 'all' && r.backstop && <div style={{ fontSize: 10, opacity: 0.6 }}>The backstop applies to these agents only.</div>}

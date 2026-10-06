@@ -245,6 +245,9 @@ interface EvalContext {
   commands: EffectiveCommand[] | null;
   /** False for an unauthenticated hook: approvals are neither used nor offered. */
   grants?: boolean;
+  /** False for an unauthenticated hook: no decision or corpus row under the claimed
+   *  agent (Dwight L7); the hook server logs it as unauthenticated instead. */
+  record?: boolean;
 }
 
 export interface PolicyPayload {
@@ -420,6 +423,9 @@ export class PolicyEngine {
     this.configured = false;
     this.loadedAt = null;
     this.reportCheckConfig = null;
+    // Dwight L2: a reload starts from the built-in defaults, so a removed on_error
+    // does not stick until the next start.
+    this.defaults = { mode: 'dry_run', on_error: 'allow' };
     if (!this.policyDir) return;
     // One-time move of engine.json + rules.json into guardrail.json. A legacy rule the
     // engine would have refused is not migrated: its file stays and its error is shown.
@@ -469,9 +475,10 @@ export class PolicyEngine {
     };
 
     try {
-      // A file with rules whose backstops are all off enforces nothing ON PURPOSE; a
-      // file with no rules at all is a truncated write or a bad edit.
-      this.loadParsed(parsed, g.file.rules.length > 0);
+      // guardrail.json is only ever written whole (temp + rename) and validated, so a
+      // file with no backstops on, or no rules at all, enforces nothing ON PURPOSE
+      // (Dwight L1: deleting every rule must not read as a broken file).
+      this.loadParsed(parsed, true);
     } catch (e) {
       // md-217 N1: a file that parses but has the wrong shape threw here and left
       // `configured: true, error: null` behind, which reads as healthy. Nothing that
@@ -754,18 +761,18 @@ export class PolicyEngine {
    *
    * Only PreToolUse is considered; every other event returns allow untouched.
    */
-  evaluate(p: PolicyPayload, opts: { grants?: boolean } = {}): PolicyVerdict {
+  evaluate(p: PolicyPayload, opts: { grants?: boolean; record?: boolean } = {}): PolicyVerdict {
     if (p.hook_event_name !== 'PreToolUse') return { decision: 'allow' };
     if (!this.configured) return { decision: 'allow' }; // unconfigured → byte-identical
 
     // grants: false (an unauthenticated hook): no approval is looked up, used or
     // offered, so the rule decides as if it were not grantable.
-    const ctx: EvalContext = { commands: null, grants: opts.grants !== false };
+    const ctx: EvalContext = { commands: null, grants: opts.grants !== false, record: opts.record !== false };
     const verdict = this.decide(p, ctx);
     // AFTER the verdict, and it cannot change it — the row carries the decision that
     // was actually returned, so a reader can tell a blind spot that was allowed from
     // one a rule caught anyway.
-    this.recordUnresolved(p, ctx, verdict);
+    if (ctx.record !== false) this.recordUnresolved(p, ctx, verdict);
     return verdict;
   }
 
@@ -974,6 +981,7 @@ export class PolicyEngine {
    * secrets, so the row keeps a digest plus which matcher fired.
    */
   private record(p: PolicyPayload, v: PolicyVerdict, ctx?: EvalContext): void {
+    if (ctx?.record === false) return;
     if (v.decision === 'deny') this.stats.denied++;
     else if (v.decision === 'ask') this.stats.asked++;
     const input_digest = digest(p.tool_input);

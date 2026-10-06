@@ -608,3 +608,40 @@ test('after Deny, the same push is refused at once with no new card; after 10 mi
   const again = desk.request('jim-1', { command: PUSH, cwd: origin }, Date.now() + 11 * 60_000);
   assert.equal(again.ok, true, 'ten minutes later it may be asked again');
 });
+
+// --- Dwight's lows ------------------------------------------------------------------------
+
+test('L3: when approvals are turned off, a waiting agent is told its request is dropped', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  await hook(f, PUSH, origin);
+  const [p] = f.server.pendingGrants();
+  const g = path.join(f.home, 'hive', 'policy', 'guardrail.json');
+  const file = JSON.parse(fs.readFileSync(g, 'utf8'));
+  delete file.rules[0].backstop.approve_on_card;
+  fs.writeFileSync(g, JSON.stringify(file));
+  f.server.reloadPolicy();
+  const told = f.inbox('jim-1').find((m) => m.act === 'refuse' && m.body.includes(p.id));
+  assert.ok(told, 'the agent hears');
+  assert.match(told.body, /approvals were turned off/i);
+});
+
+test('L8: a request that expires is not dropped silently', () => {
+  const { s } = store();
+  const dropped = [];
+  const t0 = Date.parse('2026-10-06T12:00:00Z');
+  const desk = new GrantDesk(s, resolver, (q, why) => dropped.push([q.agent_id, why]));
+  desk.request('jim', { command: PUSH, cwd: '/r' }, t0);
+  desk.pending(t0 + GRANT_TTL_MS + 1);
+  assert.deepEqual(dropped, [['jim', 'expired']]);
+});
+
+test('L6: a push command the desk cannot place is never refused (newline, --git-dir, --work-tree)', () => {
+  const { s: st } = store();
+  const desk = new GrantDesk(st, resolver);
+  const r = desk.request('jim', { command: PUSH, cwd: '/r' });
+  assert.equal(desk.openForPush('jim', 'git push', '/r').id, r.request.id, 'precondition: a plain push in the repo is placed');
+  for (const cmd of ['git --git-dir=/elsewhere/.git push', 'git --work-tree /w push', 'git status\ngit push', 'git push\ngit push evil main', 'git push origin\necho done']) {
+    assert.equal(desk.openForPush('jim', cmd, '/r'), null, JSON.stringify(cmd));
+  }
+});

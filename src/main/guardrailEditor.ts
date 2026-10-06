@@ -67,6 +67,11 @@ export class GuardrailEditor {
       return { ok: false, reason: 'changed-on-disk', errors: ['the rules file changed since this screen loaded it; reload and make the change again'] };
     }
     const current = existsSync(p) ? readGuardrail(p) : null;
+    if (current && !current.ok) {
+      // Dwight M1: never replace a file this screen could not read; it holds rules
+      // (and settings) the screen never saw. Repair it or restore a backup.
+      return { ok: false, reason: 'broken-file', errors: [`the rules file is broken (${current.error}); fix it or restore a backup before saving`] };
+    }
     const rev = (current?.ok ? current.file.rev : 0) + 1;
     const file: GuardrailFile = { ...next, version: 1, rev };
     const errors = validateGuardrail(file);
@@ -83,6 +88,14 @@ export class GuardrailEditor {
     }
     if (!errors.length) {
       const cap = this.caps(file);
+      // Dwight M2: refuse only a save that makes the cap worse, so a hive that is
+      // already over (e.g. after migration) can still delete, edit and switch.
+      const before = current?.ok ? this.caps(current.file) : null;
+      const worse = (now: { count: number; tokens: number; over: boolean }, was?: { count: number; tokens: number }) =>
+        now.over && (!was || now.count > was.count || now.tokens > was.tokens);
+      cap.over = cap.over.filter((k) => (k === 'global'
+        ? worse(cap.global, before?.global)
+        : worse(cap.perAgent[k], before?.perAgent[k])));
       if (cap.over.length) {
         errors.push(cap.over.includes('global')
           ? `over the cap: ${cap.global.count} principles for all agents (max ${cap.global.max}, about ${cap.global.maxTokens} tokens)`
@@ -100,6 +113,8 @@ export class GuardrailEditor {
     this.d.log({
       kind: 'guardrail-saved', rev, actor, rules: file.rules.length,
       backstops_on: file.rules.filter((r) => r.backstop?.on).length,
+      report_check_changed: JSON.stringify(current?.ok ? current.file.report_check ?? null : null) !== JSON.stringify(file.report_check ?? null),
+      defaults_changed: JSON.stringify(current?.ok ? current.file.defaults ?? null : null) !== JSON.stringify(file.defaults ?? null),
       rules_loaded: status?.rulesLoaded ?? null, error: status?.error ?? null,
     });
     try { await this.d.afterSave(); } catch { /* the agents catch up at the next reconcile */ }
