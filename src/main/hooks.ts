@@ -496,6 +496,11 @@ export class HookServer {
     if (!desk) return false;
     const log = (row: Record<string, unknown>) => this.hive.appendLog(row as Parameters<HiveManager['appendLog']>[0]);
     const r = desk.request(agentId, { command: msg.command, cwd: msg.cwd, reason: msg.reason ?? msg.body });
+    if (!r.ok && 'denied' in r && r.denied) {
+      log({ kind: 'grant-request-refused', agent_id: agentId, why: r.why, denied: true });
+      this.hive.send({ to: agentId, act: 'refuse', subject: 'Push denied', body: `Not accepted: ${r.why}.` }, GRANT_DESK_SENDER);
+      return true;
+    }
     if (!r.ok) {
       log({ kind: 'grant-request-refused', agent_id: agentId, why: r.why });
       this.hive.send({
@@ -556,6 +561,7 @@ The approvable form is one Bash call: git [-C <dir>] push <remote> <40-char sha>
       const input = (p.tool_input ?? {}) as Record<string, unknown>;
       const desk = this.grantDesk();
       const r = desk?.request(agentId, { command: input.command, cwd: p.cwd, reason: 'Raised by the push itself.' });
+      if (r && !r.ok && 'denied' in r && r.denied) return `Not run: ${r.why}.`;
       if (r?.ok) {
         if (r.fresh) this.announceRequest(agentId, r.request, 'hook');
         return `Not run: this push needs the operator's approval. Request ${r.request.id} is on the Approvals card in ASK ME. End your turn and wait. When a message says "Approved", run exactly this, as one Bash call, in the same directory: ${r.request.command}

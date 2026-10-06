@@ -250,12 +250,18 @@ export const GRANT_DESK_FILE = 'grant-desk.json';
 interface DeskState {
   pending: GrantRequest[];
   approved: Array<{ grant: Grant; command: string; cwd: string | null }>;
+  /** Pushes the operator denied, held for GRANT_DENY_HOLD_MS (finish plan item 8). */
+  denied: Array<{ agent_id: string; class: string; target: GitPushTarget; at: string }>;
 }
+
+/** After Deny, the same push by the same agent is refused at once, with no new card. */
+export const GRANT_DENY_HOLD_MS = 10 * 60 * 1000;
 
 export class GrantDesk {
   private pendingById = new Map<string, GrantRequest>();
   /** Approved commands, in order, so a retry in another form can be told the exact one. */
   private approved: DeskState['approved'] = [];
+  private denied: DeskState['denied'] = [];
   private statePath: string;
 
   /** Loads what was waiting or approved before a restart (finish plan item 3). A torn
@@ -267,8 +273,9 @@ export class GrantDesk {
         const st = JSON.parse(readFileSync(this.statePath, 'utf8')) as Partial<DeskState>;
         for (const q of Array.isArray(st.pending) ? st.pending : []) if (q && typeof q.id === 'string') this.pendingById.set(q.id, q);
         this.approved = (Array.isArray(st.approved) ? st.approved : []).filter((a) => a && a.grant && typeof a.command === 'string');
+        this.denied = (Array.isArray(st.denied) ? st.denied : []).filter((d) => d && d.target && typeof d.at === 'string');
       }
-    } catch { this.pendingById.clear(); this.approved = []; }
+    } catch { this.pendingById.clear(); this.approved = []; this.denied = []; }
   }
 
   /** temp + rename, so a crash leaves the old state or the new, never half. */
@@ -276,7 +283,7 @@ export class GrantDesk {
     try {
       mkdirSync(dirname(this.statePath), { recursive: true });
       const tmp = `${this.statePath}.tmp-${randomBytes(4).toString('hex')}`;
-      writeFileSync(tmp, JSON.stringify({ pending: [...this.pendingById.values()], approved: this.approved }, null, 2) + '\n');
+      writeFileSync(tmp, JSON.stringify({ pending: [...this.pendingById.values()], approved: this.approved, denied: this.denied }, null, 2) + '\n');
       renameSync(tmp, this.statePath);
     } catch { /* the in-memory desk still works; a restart then forgets */ }
   }
@@ -284,6 +291,8 @@ export class GrantDesk {
   /** Drop requests that waited longer than a grant would live. */
   private expire(now: number): void {
     let changed = false;
+    const held = this.denied.filter((d) => now - Date.parse(d.at) < GRANT_DENY_HOLD_MS);
+    if (held.length !== this.denied.length) { this.denied = held; changed = true; }
     for (const [id, q] of this.pendingById) {
       if (!(now - Date.parse(q.requested_at) < GRANT_TTL_MS)) { this.pendingById.delete(id); changed = true; }
     }
@@ -293,12 +302,17 @@ export class GrantDesk {
   /** A new pending request, or the one already waiting for this agent's exact action
    *  (`fresh: false`): a retry before the operator decides raises no second card. */
   request(agentId: string, input: { command?: unknown; cwd?: unknown; reason?: unknown }, now = Date.now()):
-    { ok: true; request: GrantRequest; fresh: boolean } | { ok: false; why: string } {
+    { ok: true; request: GrantRequest; fresh: boolean } | { ok: false; why: string; denied?: true } {
     if (typeof input.command !== 'string' || !input.command.trim()) return { ok: false, why: 'the request has no command' };
     const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : null;
     const c = canonicalAction(input.command, cwd, this.inspect);
     if (!c.ok) return c;
     this.expire(now);
+    const no = this.denied.find((d) => d.agent_id === agentId && d.class === c.action.class && sameTarget(d.target, c.action.target));
+    if (no) {
+      const until = new Date(Date.parse(no.at) + GRANT_DENY_HOLD_MS).toISOString();
+      return { ok: false, denied: true, why: `the operator denied this push at ${no.at}; do not run it (it may be asked again after ${until})` };
+    }
     for (const q of this.pendingById.values()) {
       if (q.agent_id === agentId && q.action.class === c.action.class && sameTarget(q.action.target, c.action.target)) {
         return { ok: true, request: q, fresh: false };
@@ -334,6 +348,7 @@ export class GrantDesk {
     this.pendingById.delete(requestId);
     const grant = approve ? this.store.mint(request, now) : null;
     if (grant) this.approved.push({ grant, command: request.command, cwd: request.cwd });
+    else this.denied.push({ agent_id: request.agent_id, class: request.action.class, target: request.action.target, at: new Date(now).toISOString() });
     this.persist();
     return { request, grant };
   }

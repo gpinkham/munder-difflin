@@ -587,3 +587,24 @@ test('the worker reaper skips a worker that is waiting on an approval', () => {
   const loop = main.slice(main.indexOf('async function ephemeralWorkerTick'), main.indexOf('if (idleMs > idleTimeoutMs)'));
   assert.match(loop, /if \(hookServer\.awaitingApproval\(workerId\)\) continue;/);
 });
+
+// --- Finish plan item 8: after Deny, the same push is refused for 10 minutes -----------
+
+test('after Deny, the same push is refused at once with no new card; after 10 minutes it may ask again', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  await hook(f, PUSH, origin);
+  const [p] = f.server.pendingGrants();
+  f.server.decideGrant(p.id, false);
+  const out = await hook(f, PUSH, origin);
+  assert.equal(decisionOf(out), 'deny');
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /denied/i);
+  assert.equal(f.server.pendingGrants().length, 0, 'no second card');
+  f.drop({ ...REQUEST, cwd: origin });
+  assert.equal(f.server.pendingGrants().length, 0, 'an outbox request is refused too');
+  assert.ok(f.inbox('jim-1').some((m) => m.act === 'refuse' && /denied/i.test(m.body)));
+  const { GrantDesk: D } = loadTs('src/main/grants.ts');
+  const desk = new D(new GrantStore(f.grantsFile));
+  const again = desk.request('jim-1', { command: PUSH, cwd: origin }, Date.now() + 11 * 60_000);
+  assert.equal(again.ok, true, 'ten minutes later it may be asked again');
+});
