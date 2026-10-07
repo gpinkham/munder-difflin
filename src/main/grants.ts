@@ -416,11 +416,12 @@ export class GrantDesk {
   }
 
   /** openFor, limited to approvals for the remote this push command would send to.
-   *  Null when the command's target cannot be worked out: then nothing is refused. */
+   *  When the target cannot be worked out (no repo at that cwd, a compound command),
+   *  any approval this agent has open: a resumed agent copies an old plain push into
+   *  its inbox, where it can only ask (F1, narrowing Dwight L6 to no approval open). */
   openForPush(agentId: string, command: string, cwd: string | null, now = Date.now()): ReturnType<GrantDesk['openFor']> {
     const url = this.pushTargetUrl(command, cwd);
-    if (!url) return null;
-    return this.openFor(agentId, now, url);
+    return this.openFor(agentId, now, url ?? undefined);
   }
 
   /** The push a grant approved, rebuilt from the grant itself to run outside the

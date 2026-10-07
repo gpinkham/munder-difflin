@@ -100,7 +100,8 @@ test('without the token: the decision only (rules still enforced), no card, no g
   const f = await floor(t);
   for (const token of [undefined, 'forged', f.auth.token('pam')]) {
     assert.equal(f.decision(await f.send('rm -rf /x', token)), 'deny', 'a block still blocks');
-    assert.equal(f.decision(await f.send(PUSH, token)), 'ask', 'no approval path: the push asks');
+    // F2: approve-on-card cannot answer for it, and an ask is a terminal question.
+    assert.equal(f.decision(await f.send(PUSH, token)), 'deny', 'no approval path: the push is refused');
     assert.equal(JSON.stringify(await f.send('ls', token, 'Stop')), '{}', 'other events are ignored');
   }
   assert.equal(f.server.pendingGrants().length, 0, 'no card was raised');
@@ -111,7 +112,7 @@ test('without the token: the decision only (rules still enforced), no card, no g
   await f.send(PUSH, f.auth.token('jim-1'));
   const [p] = f.server.pendingGrants();
   f.server.decideGrant(p.id, true);
-  assert.equal(f.decision(await f.send(PUSH, 'forged')), 'ask');
+  assert.equal(f.decision(await f.send(PUSH, 'forged')), 'deny');
   assert.doesNotMatch(fs.readFileSync(path.join(f.home, 'hive', 'policy', 'grants.jsonl'), 'utf8'), /"op":"use"/);
   assert.equal(f.decision(await f.send(PUSH, f.auth.token('jim-1'))), 'allow', 'the real agent still has it');
 });

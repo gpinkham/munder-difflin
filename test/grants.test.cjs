@@ -532,7 +532,16 @@ test('day job: `cd <repo> && git push …` is refused with the runnable command,
   assert.equal(decisionOf(after), 'deny', 'approved: the exact day-job retry is refused, not asked');
   assert.ok(after.hookSpecificOutput.permissionDecisionReason.includes(RUNNABLE(origin)), 'and told the approved command');
   assert.equal(decisionOf(await hook(f, RUNNABLE(origin), inbox)), 'allow', 'the grant was not spent by the refusals');
-  // Not this shape: unchanged, it asks as before.
+  // Not this shape: with an approval open, F1 refuses any push it cannot place.
+  for (const other of [`cd ${origin}; ${PUSH}`, `cd $D && ${PUSH}`, `cd ${origin} && ${PUSH} && echo x`, `cd ${origin} && GIT_DIR=x ${PUSH}`]) {
+    assert.equal(decisionOf(await hook(f, other, inbox)), 'deny', other);
+  }
+});
+
+test('day job: other cd shapes, with no approval open, ask as before', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  const inbox = path.join(f.home, 'hive', 'agents', 'jim-1', 'inbox');
   for (const other of [`cd ${origin}; ${PUSH}`, `cd $D && ${PUSH}`, `cd ${origin} && ${PUSH} && echo x`, `cd ${origin} && GIT_DIR=x ${PUSH}`]) {
     assert.equal(decisionOf(await hook(f, other, inbox)), 'ask', other);
   }
@@ -605,6 +614,49 @@ test('on: with nothing waiting or approved, another push form still asks', async
   const origin = gitRepo(t);
   const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
   assert.equal(decisionOf(await hook(f, 'git push', origin)), 'ask');
+});
+
+// F1 (god, 2026-10-07): a resumed agent copies the old grant text and runs a plain
+// `git push origin <sha>:<ref>` from its inbox. There it cannot be placed, so it
+// asked: the terminal question after Approve. While the agent has an approval waiting
+// or open, a push that cannot be placed is refused with the exact command instead.
+// This narrows Dwight L6 (an unplaceable push asked as usual) to "no approval open".
+test('F1: while an approval is open, a push that cannot be placed is refused with the exact command', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  const inbox = path.join(f.home, 'hive', 'agents', 'jim-1', 'inbox');
+  fs.mkdirSync(inbox, { recursive: true });
+  assert.equal(decisionOf(await hook(f, PUSH, inbox)), 'ask', 'no approval open: as before');
+  f.drop({ ...REQUEST, cwd: origin });
+  for (const cmd of [PUSH, `${PUSH} && echo done`]) {
+    const out = await hook(f, cmd, inbox);
+    assert.equal(decisionOf(out), 'deny', `${cmd}: refused while waiting, not asked`);
+    assert.ok(out.hookSpecificOutput.permissionDecisionReason.includes(RUNNABLE(origin)), `${cmd}: names the command`);
+  }
+  f.server.decideGrant(f.server.pendingGrants()[0].id, true);
+  const out = await hook(f, PUSH, inbox);
+  assert.equal(decisionOf(out), 'deny', 'approved: refused, not asked');
+  assert.ok(out.hookSpecificOutput.permissionDecisionReason.includes(RUNNABLE(origin)));
+  assert.equal(decisionOf(await hook(f, RUNNABLE(origin), inbox)), 'allow', 'and the named command runs');
+  const other = gitRepo(t);
+  require('node:child_process').execFileSync('git', ['-C', other, 'remote', 'set-url', 'origin', 'git@elsewhere.example:o/r.git']);
+  assert.equal(decisionOf(await hook(f, 'git push origin main', other)), 'ask', 'a push placed at another remote still asks');
+});
+
+// F2 (god, 2026-10-07): an agent the current app run did not start has no valid hook
+// token, so approvals cannot apply and its push asked even in the approved form.
+// Refuse it and say what to do instead.
+test('F2: a push without a valid hook token under an approve-on-card rule is refused with "restart this agent"', async (t) => {
+  const origin = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE, { id: 'other-ask', decision: 'ask', mode: 'live', reason: 'x', match: { tool: 'Bash', command_matches: '^rm\\b' } }] });
+  const { HookAuth } = loadTs('src/main/hookAuth.ts');
+  f.server.setHookAuth(new HookAuth());
+  const out = await hook(f, RUNNABLE(origin), origin);
+  assert.equal(decisionOf(out), 'deny', 'not a terminal question');
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /restart this agent/i);
+  assert.deepEqual(f.server.pendingGrants(), [], 'still nothing done in its name');
+  assert.equal(decisionOf(await hook(f, 'rm x', origin)), 'ask', 'another ask rule is unchanged');
+  assert.equal(decisionOf(await hook(f, 'ls', origin)), 'none');
 });
 
 test('on: a push no grant can cover still opens the terminal prompt', async (t) => {
@@ -707,7 +759,9 @@ test('another push form is refused only toward the approved remote; elsewhere it
   assert.equal(decisionOf(await hook(f, 'git push -u origin other', elsewhere)), 'ask', 'a different repo and remote: the usual prompt');
   assert.equal(decisionOf(await hook(f, 'git push', a)), 'deny', 'the approved remote: refused with the exact command');
   assert.equal(decisionOf(await hook(f, `git -C ${a} push origin HEAD`, elsewhere)), 'deny', 'git -C points at the approved repo');
-  assert.equal(decisionOf(await hook(f, 'git push upstream main', a)), 'ask', 'a remote the repo does not have: no match, the usual prompt');
+  // F1: a remote the repo does not have cannot be placed, so while an approval is open
+  // it is refused with the approved command (it used to ask).
+  assert.equal(decisionOf(await hook(f, 'git push upstream main', a)), 'deny', 'a remote the repo does not have: refused, not asked');
 });
 
 // Dwight on d73c8ec8: the runnable form quotes its repo. One parser must place it, or
@@ -825,12 +879,16 @@ test('L8: a request that expires is not dropped silently', () => {
   assert.deepEqual(dropped, [['jim', 'expired']]);
 });
 
-test('L6: a push command the desk cannot place is never refused (newline, --git-dir, --work-tree)', () => {
+// L6, narrowed by F1 (god, 2026-10-07): a push the desk cannot place is refused only
+// while this agent has an approval open, and then with that approval's command; with
+// none open it is never refused.
+test('L6/F1: a push command the desk cannot place is refused only while an approval is open', () => {
   const { s: st } = store();
   const desk = new GrantDesk(st, resolver);
+  const cmds = ['git --git-dir=/elsewhere/.git push', 'git --work-tree /w push', 'git status\ngit push', 'git push\ngit push evil main', 'git push origin\necho done'];
+  for (const cmd of cmds) assert.equal(desk.openForPush('jim', cmd, '/r'), null, `none open: ${JSON.stringify(cmd)}`);
   const r = desk.request('jim', { command: PUSH, cwd: '/r' });
   assert.equal(desk.openForPush('jim', 'git push', '/r').id, r.request.id, 'precondition: a plain push in the repo is placed');
-  for (const cmd of ['git --git-dir=/elsewhere/.git push', 'git --work-tree /w push', 'git status\ngit push', 'git push\ngit push evil main', 'git push origin\necho done']) {
-    assert.equal(desk.openForPush('jim', cmd, '/r'), null, JSON.stringify(cmd));
-  }
+  for (const cmd of cmds) assert.equal(desk.openForPush('jim', cmd, '/r')?.id, r.request.id, `open: ${JSON.stringify(cmd)}`);
+  assert.equal(desk.openForPush('pam', 'git status\ngit push', '/r'), null, 'only the agent that has one open');
 });

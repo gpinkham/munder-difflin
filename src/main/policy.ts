@@ -868,6 +868,11 @@ export class PolicyEngine {
     return this.grantStore;
   }
 
+  /** True when the loaded rule with this id approves on a card. */
+  isGrantable(ruleId: string | undefined): boolean {
+    return !!ruleId && this.rules.some((r) => r.id === ruleId && Array.isArray(r.grantable) && r.grantable.length > 0);
+  }
+
   /** True when some loaded rule is grantable: the switch for the whole approval flow. */
   get grantsActive(): boolean {
     return this.rules.some((r) => Array.isArray(r.grantable) && r.grantable.length > 0);

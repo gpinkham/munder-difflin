@@ -313,9 +313,13 @@ export class HookServer {
           // No decision or corpus row under the claimed agent (Dwight L7): the refusal
           // is recorded below, as unauthenticated.
           const v = policy.evaluate({ hook_event_name: event, agent_id: agentId, tool_name: p.tool_name, tool_input: p.tool_input, cwd: p.cwd }, { grants: false, record: false });
-          decision = v.decision;
+          // F2: an ask that approve-on-card would answer cannot be answered for an agent
+          // without its token, and an ask is a terminal question. Refuse it and say why.
+          const stale = v.decision === 'ask' && policy.isGrantable(v.ruleId);
+          decision = stale ? 'deny' : v.decision;
           if (v.decision !== 'allow') {
-            out = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: v.decision, permissionDecisionReason: `[policy:${v.ruleId}] ${v.reason ?? 'Denied by policy.'}` } };
+            out = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: decision, permissionDecisionReason: `[policy:${v.ruleId}] ${v.reason ?? 'Denied by policy.'}`
+              + (stale ? ' Not run: this agent\'s hook token is not valid (it was not started by the running app), so an approval cannot apply. Ask the operator to restart this agent, then push again.' : '') } };
           }
         }
       } catch { out = {}; }

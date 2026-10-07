@@ -56,7 +56,14 @@ The status line at the top of Settings -> General and of the Rules screen says
   that `git -C` command, never asked (an ask is a terminal prompt, in
   bypassPermissions too).
 - Another form of the push to the same remote, while an approval is waiting or
-  unused, is refused with the exact approved command. A push elsewhere asks as usual.
+  unused, is refused with the exact approved command. So is a push that cannot be
+  placed at all (no repo where it runs, a compound command), for example an old
+  `git push origin …` an agent copies from a resumed conversation into its inbox.
+  A push placed at another remote asks as usual, and with no approval open nothing
+  is refused.
+- An agent without a valid hook token (not started by the running app) cannot use
+  approvals, so its push under an approve-on-card rule is refused with "restart
+  this agent" instead of asked.
 - An approval works once (the identical retry within 10 minutes is allowed) and
   lasts 60 minutes. A request waiting longer expires. After Deny, the same push is
   refused for 10 minutes with no new card.
