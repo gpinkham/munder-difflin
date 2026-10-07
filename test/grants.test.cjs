@@ -643,6 +643,28 @@ test('F1: while an approval is open, a push that cannot be placed is refused wit
   assert.equal(decisionOf(await hook(f, 'git push origin main', other)), 'ask', 'a push placed at another remote still asks');
 });
 
+// Dwight F1-M1 on f768a8d3: a cd form names its own repo, so it is refused with its
+// own command, never with the open approval for another repo.
+test('F1-M1: with an approval open for repo A, `cd <B> && git push …` names B\'s command, not A\'s', async (t) => {
+  const a = gitRepo(t);
+  const b = gitRepo(t);
+  const f = await floor(t, { version: 1, rules: [PUSH_RULE] });
+  const inbox = path.join(f.home, 'hive', 'agents', 'jim-1', 'inbox');
+  fs.mkdirSync(inbox, { recursive: true });
+  const CD_B = `cd ${b} && git push origin ${SHA2}:refs/heads/feat/y`;
+  const RUN_B = `git -C '${b}' push origin ${SHA2}:refs/heads/feat/y`;
+  f.drop({ ...REQUEST, cwd: a });
+  for (const state of ['waiting', 'approved']) {
+    if (state === 'approved') f.server.decideGrant(f.server.pendingGrants()[0].id, true);
+    const out = await hook(f, CD_B, inbox);
+    assert.equal(decisionOf(out), 'deny', `${state}: refused`);
+    const why = out.hookSpecificOutput.permissionDecisionReason;
+    assert.ok(why.includes(RUN_B), `${state}: names B's runnable command`);
+    assert.ok(!why.includes(RUNNABLE(a)), `${state}: never A's command`);
+  }
+  assert.equal(decisionOf(await hook(f, RUNNABLE(a), inbox)), 'allow', 'A\'s grant was not spent');
+});
+
 // F2 (god, 2026-10-07): an agent the current app run did not start has no valid hook
 // token, so approvals cannot apply and its push asked even in the approved form.
 // Refuse it and say what to do instead.

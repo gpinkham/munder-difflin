@@ -54,7 +54,8 @@ The status line at the top of Settings -> General and of the Rules screen says
   because an agent's shell is usually not in the repo. `cd <repo> && git push …`
   cannot be approved; when it is otherwise the approvable push it is refused with
   that `git -C` command, never asked (an ask is a terminal prompt, in
-  bypassPermissions too).
+  bypassPermissions too). This comes first: an approval open for another repo
+  never takes its place.
 - Another form of the push to the same remote, while an approval is waiting or
   unused, is refused with the exact approved command. So is a push that cannot be
   placed at all (no repo where it runs, a compound command), for example an old

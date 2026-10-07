@@ -908,8 +908,9 @@ If it says "Denied", do not push.`;
         }
         // Another push form while this agent has a push waiting or approved: no grant can
         // cover it and an ask would open the prompt again, so refuse it and name the
-        // exact approved command.
-        const open = v.notApprovable && agentId ? (this.openApproval(agentId, p) ?? this.cdFormRefusal(p)) : null;
+        // exact approved command. A cd form names its own repo, so it gets its own
+        // command first, never another repo's open approval (Dwight F1-M1).
+        const open = v.notApprovable && agentId ? (this.cdFormRefusal(p) ?? this.openApproval(agentId, p)) : null;
         if (v.decision !== 'allow') {
           const decision = open ? 'deny' : v.decision;
           if (decision === 'ask' && agentId && v.ruleId) this.policyAsks.set(agentId, { ruleId: v.ruleId, at: Date.now() });
