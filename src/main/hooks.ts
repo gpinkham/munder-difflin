@@ -650,7 +650,7 @@ export class HookServer {
         // turning it off takes effect without a restart.
         () => { try { return this.getConfig().decisionCorpus !== false; } catch { return false; } },
         undefined,
-        () => this.workspaceContainers()
+        { workspaceContainers: () => this.workspaceContainers() }
       );
       this.policy.load();
     }

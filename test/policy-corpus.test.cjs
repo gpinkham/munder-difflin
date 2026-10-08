@@ -469,7 +469,8 @@ test('leak: an id that is not live, under a workspace container, is masked', () 
   assert.equal(n('/Users/dev/Harness/worktrees/ryan-2/a.md'), '<home>/Harness/worktrees/<agent:other>/a.md', 'a live id keeps its label');
   assert.equal(n('/Users/dev/Harness/worktrees/jim-1'), '<home>/Harness/worktrees/<agent:self>');
   assert.equal(n('/Users/dev/Harness/worktrees'), '<home>/Harness/worktrees', 'the container itself names nobody');
-  assert.equal(n('/Users/dev/other/worktrees/x-1/a.md'), '<home>/other/worktrees/x-1/a.md', 'only the configured containers');
+  // Dwight M1: matched by folder name wherever it sits, so this masks too (fail closed).
+  assert.equal(n('/Users/dev/other/worktrees/x-1/a.md'), '<home>/other/worktrees/<agent:unknown>/a.md');
 });
 
 test('leak: a segment carrying a known id inside a longer name is not written', () => {
@@ -490,7 +491,7 @@ test('leak e2e: the engine passes its workspace containers, so a decision row ca
   fs.writeFileSync(path.join(hiveRoot, 'policy', 'engine.json'), JSON.stringify(pack));
   const ws = [{ agentId: 'jim-1', roots: [path.join(base, 'wt', 'jim-1')] }, { agentId: 'ryan-2', roots: [path.join(base, 'wt', 'ryan-2')] }];
   for (const w of ws) fs.mkdirSync(w.roots[0], { recursive: true });
-  const engine = new PolicyEngine(hiveRoot, () => {}, () => [], () => ws, () => true, undefined, () => [path.join(base, 'wt')]);
+  const engine = new PolicyEngine(hiveRoot, () => {}, () => [], () => ws, () => true, undefined, { workspaceContainers: () => [path.join(base, 'wt')] });
   engine.load();
   const v = engine.evaluate({ hook_event_name: 'PreToolUse', agent_id: 'jim-1', tool_name: 'Bash', cwd: path.join(base, 'wt', 'jim-1'),
     tool_input: { command: `awk 1 ${path.join(base, 'wt', 'meredith-zz9q1', 'CLAUDE.md')}; cp x ${path.join(base, 'wt', 'ryan-2', 'CLAUDE.md')}` } });
@@ -517,4 +518,32 @@ test('leak: a short fixed id is masked as a whole segment only, so ordinary name
   const n = (p) => normalizeForCorpus(p, WS_CTX);
   assert.equal(n('/Users/dev/Harness/hive/agents/god/memory.md'), '<hive>/agents/<agent:other>/memory.md');
   assert.equal(n('/Users/dev/repo/godot-notes.md'), '<home>/repo/godot-notes.md');
+});
+
+// Dwight M1 on 33606d0c: the container mask needed a clean absolute prefix, so the same
+// path written another way still leaked a non-live id. Now any segment after one named
+// like a container (agents, worktrees, code-worktrees) is an id, whatever comes before
+// it, and '.' segments are dropped first. Fail closed: no cwd needed.
+test('M1: a non-live id is masked however the path is written', () => {
+  const n = (p) => normalizeForCorpus(p, WS_CTX);
+  for (const p of [
+    '~/Harness/worktrees/meredith-zz9q1/a',
+    './worktrees/meredith-zz9q1/a',
+    '../worktrees/meredith-zz9q1/a',
+    '/Users/dev/Harness/hive/../worktrees/meredith-zz9q1/a',
+    '/Users/dev/Harness/worktrees/./meredith-zz9q1/a',
+    '../code-worktrees/meredith-zz9q1/T-1/app',
+    '~/Harness/hive/agents/meredith-zz9q1/memory.md',
+    '../agents/meredith-zz9q1/outbox/x.json',
+  ]) {
+    const out = n(p);
+    assert.ok(!out.includes('meredith'), `${p} -> ${out}`);
+    assert.ok(out.includes('<agent:unknown>'), `${p} -> ${out}`);
+  }
+  assert.ok(n('~/Harness/worktrees/ryan-2/a').includes('<agent:other>'), 'a live id keeps its label');
+});
+
+test('M1: an id in a git -C path in argv is masked too', () => {
+  const out = scrubArgv(['git', '-C', '~/Harness/worktrees/meredith-zz9q1', 'log'], WS_CTX);
+  assert.ok(!out.join(' ').includes('meredith'), out.join(' '));
 });

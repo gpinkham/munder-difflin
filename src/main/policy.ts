@@ -377,6 +377,7 @@ export class PolicyEngine {
   private configured = false;
   private defaults: { mode: PolicyMode; on_error: 'allow' | 'deny' } = { mode: 'dry_run', on_error: 'allow' };
   private loadedAt: string | null = null;
+  private workspaceContainers: () => string[];
   /** The report check's settings, or null when the policy file does not turn it on. */
   private reportCheckConfig: { mode: PolicyMode } | null = null;
 
@@ -404,10 +405,15 @@ export class PolicyEngine {
     private corpusEnabled: () => boolean = () => false,
     /** How the grant check reads a repo (push url, push risks). Injected by tests. */
     private gitInspect: GitInspector = gitInspector,
-    /** Absolute directories whose next segment is an agent id, so the corpus can
-     *  mask an id there that is not live (2026-10-08 leak). */
-    private workspaceContainers: () => string[] = () => []
+    /** Named options. New settings go here, not as another positional argument: the
+     *  positional list is long enough that a slot has been filled with the wrong value. */
+    opts: {
+      /** Absolute directories whose children are agent ids (hive/agents, each workspace
+       *  root), so the corpus masks an id there that is not live. */
+      workspaceContainers?: () => string[];
+    } = {}
   ) {
+    this.workspaceContainers = opts.workspaceContainers ?? (() => []);
     this.hiveRoot = hiveRoot;
     this.policyDir = hiveRoot ? join(hiveRoot, 'policy') : '';
     this.policyPath = this.policyDir ? join(this.policyDir, ENGINE_POLICY_FILE) : '';

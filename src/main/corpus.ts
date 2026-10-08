@@ -134,30 +134,23 @@ export function normalizeForCorpus(raw: unknown, ctx: CorpusContext): string {
     if (p.startsWith(dir + '/')) { prefix = label; p = p.slice(dir.length + 1); break; }
   }
 
-  // The segment right after a workspace container is an agent id, live or not
-  // (2026-10-08: an archived id under worktrees/ was written verbatim). Its index is
-  // counted on the raw path and carried over to `segs` below.
-  const rawSegs = raw.replace(/\/+$/, '').split('/').filter(Boolean);
-  const idAt = new Set<number>();
-  for (const c of ctx.workspaceContainers ?? []) {
-    const cs = c.replace(/\/+$/, '').split('/').filter(Boolean);
-    if (cs.length && rawSegs.length > cs.length && cs.every((x, k) => rawSegs[k] === x)) idAt.add(cs.length);
-  }
+  // The segment after a folder named like an id container (hive/agents, worktrees,
+  // code-worktrees, and every configured workspace root) is an agent id, live or not.
+  // Matched by NAME, whatever comes before it, so `~/…`, `./…`, `../…` and a path
+  // through `..` mask it too, with no cwd needed (Dwight M1 on 33606d0c). Fail closed:
+  // a project folder that happens to be called `agents` loses its next name.
+  const containers = new Set(['agents', 'worktrees', 'code-worktrees',
+    ...(ctx.workspaceContainers ?? []).map((c) => c.replace(/\/+$/, '').split('/').pop() ?? '').filter(Boolean)]);
   const out: string[] = [];
-  const segs = p.split('/').filter(Boolean);
-  const offset = rawSegs.length - segs.length;
+  // '.' says nothing, and left in it would sit between a container and its id.
+  const segs = p.split('/').filter((x) => x && x !== '.');
   segs.forEach((seg, i) => {
     const known = agentLabel(seg, ctx);
     if (known) { out.push(known); return; }
-    if (idAt.has(i + offset)) { out.push('<agent:unknown>'); return; }
-    // A known id inside a longer name (`2026-…-<id>-status.json`) is still the id.
+    if (i > 0 && containers.has(segs[i - 1])) { out.push('<agent:unknown>'); return; }
+    // A known id of 6+ characters inside a longer name (`2026-…-<id>-status.json`) is
+    // still the id. A shorter one ('god') is masked only as a whole segment, above.
     if (carriesId(seg, ctx)) { out.push('<x>'); return; }
-    // An id we do not know still sits in the agents directory, and its NAME is not
-    // ours to publish — say where it is instead.
-    if (i > 0 && segs[i - 1] === 'agents' && (prefix === '<hive>' || prefix === '<policy>')) {
-      out.push('<agent:unknown>');
-      return;
-    }
     out.push(safeSegment(seg) ? seg : '<x>');
   });
   return [prefix, ...out].join('/');
