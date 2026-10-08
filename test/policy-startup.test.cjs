@@ -298,3 +298,22 @@ test('md-136: decisionCorpus:false turns it off with no restart and leaves no fi
   assert.ok(decide(server, hive, home).ruleId);
   assert.equal(fs.existsSync(corpusPathIn(hive)), false);
 });
+
+// Dwight L1 on the upstream-main merge: upstream's socket code binds asynchronously and
+// may never succeed (no root yet, or a stranger owns the path). The status row and the
+// "failed to load" message to god must not wait for a bind; they come from start(),
+// once per app run, and a later re-bind does not repeat them.
+test('start() announces the policy even when the socket never binds, and only once', async (t) => {
+  const { hive, server, logRows, godInbox } = await floor(t, { 'authority.json': HOOK_SCHEMA });
+  // A path no socket can be bound at: its directory is a file.
+  const blocker = path.join(hive.root(), 'not-a-dir');
+  fs.writeFileSync(blocker, 'x');
+  hive.sockPath = () => path.join(blocker, 'hooks.sock');
+  server.start();
+  t.after(() => server.stop());
+  assert.equal(logRows().filter((r) => r.kind === 'policy-status').length, 1, 'written at start, before any bind');
+  assert.equal(godInbox().filter((m) => /Guardrail policy failed to load/.test(m.subject)).length, 1);
+  await new Promise((r) => setTimeout(r, 50));
+  server.start();
+  assert.equal(logRows().filter((r) => r.kind === 'policy-status').length, 1, 'not repeated');
+});

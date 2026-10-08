@@ -244,3 +244,19 @@ test('a hold is reported once per cooldown per worker, and forget() resets it', 
   w.forget('stanley', 'pty-stanley');
   assert.equal(w.shouldReportHold('stanley', NOW + WORKER_WAKE_COOLDOWN_MS + 1_000), true);
 });
+
+// Dwight on the upstream-main merge: a terminal at a menu (a permission prompt, a
+// question) is held as 'menu' even when the stall rule would otherwise override a
+// chatty or quiet terminal, because the nudge's Enter would answer the menu. Pinned so
+// a reorder cannot put the stall bypass ahead of the menu check.
+test('a stalled worker at an open menu is held as menu, not nudged; closed, it is nudged', () => {
+  const w = watchdog();
+  const stalled = { oldestMailAt: NOW - 17 * 60_000, lastActivityAt: 0 };
+  for (const lastOutputAt of [NOW - 1_000, NOW - 10 * 60_000]) {
+    const atMenu = chatty({ ...stalled, lastOutputAt, awaitingAnswer: true });
+    assert.equal(isStalledWorker(atMenu, NOW), true, 'precondition: the stall rule applies');
+    assert.equal(w.explain(atMenu, NOW), 'menu', `output ${NOW - lastOutputAt} ms ago`);
+    assert.deepEqual(w.decide([atMenu], NOW), []);
+  }
+  assert.deepEqual(w.decide([chatty({ ...stalled, awaitingAnswer: false })], NOW), ['stanley']);
+});

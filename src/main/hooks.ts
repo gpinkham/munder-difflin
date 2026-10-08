@@ -271,6 +271,9 @@ export class HookServer {
    *  hive's log.jsonl), failures are retried, and the beat keeps verifying. */
   start(): void {
     this.stopped = false;
+    // The policy's load status does not need the socket: say it now, so a bind that
+    // never succeeds (no root yet, a stranger on the path) cannot hide it.
+    this.announceOnce();
     void this.ensureListening();
   }
 
@@ -322,6 +325,14 @@ export class HookServer {
   }
 
   private policyAnnounced = false;
+  /** The policy's load status, once per app run: from start(), or from the first bind
+   *  when start() ran before the hive had a root. Never again on a re-bind after a lost
+   *  socket: the policy has not changed, and god would only hear the same thing twice. */
+  private announceOnce(): void {
+    if (this.policyAnnounced || !this.hive.root()) return;
+    this.policyAnnounced = true;
+    this.announcePolicy();
+  }
 
   private async bind(sock: string): Promise<void> {
     this.binding = true;
@@ -364,7 +375,7 @@ export class HookServer {
       console.log(`[hive] hook server listening on ${sock}`);
       this.hive.appendLog({ kind: 'hooks', state: 'listening', path: sock });
       // Once per app run, not per re-bind: the policy load status (md-216).
-      if (!this.policyAnnounced) { this.policyAnnounced = true; this.announcePolicy(); }
+      this.announceOnce();
     } finally {
       this.binding = false;
     }
