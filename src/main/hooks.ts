@@ -329,9 +329,16 @@ export class HookServer {
    *  when start() ran before the hive had a root. Never again on a re-bind after a lost
    *  socket: the policy has not changed, and god would only hear the same thing twice. */
   private announceOnce(): void {
-    if (this.policyAnnounced || !this.hive.root()) return;
-    this.policyAnnounced = true;
-    this.announcePolicy();
+    // Never throws: it runs inside start() and inside bind() after listen succeeded,
+    // and a throw there would reject the bind (an unhandled rejection in main, since
+    // start() does not await it) for the sake of a log row (Dwight on acc0e860).
+    try {
+      if (this.policyAnnounced || !this.hive.root()) return;
+      this.policyAnnounced = true;
+      this.announcePolicy();
+    } catch (e) {
+      console.error('[policy] announce failed:', e);
+    }
   }
 
   private async bind(sock: string): Promise<void> {

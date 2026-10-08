@@ -317,3 +317,13 @@ test('start() announces the policy even when the socket never binds, and only on
   server.start();
   assert.equal(logRows().filter((r) => r.kind === 'policy-status').length, 1, 'not repeated');
 });
+
+// Dwight on acc0e860: announceOnce runs inside start() and inside bind(); a throw there
+// would escape start() or reject the bind. It must swallow and log instead.
+test('announceOnce never throws, even when the hive cannot answer', async (t) => {
+  const { hive, server } = await floor(t, { 'authority.json': HOOK_SCHEMA });
+  hive.root = () => { throw new Error('boom'); };
+  hive.sockPath = () => null;
+  assert.doesNotThrow(() => server.start());
+  t.after(() => server.stop());
+});
