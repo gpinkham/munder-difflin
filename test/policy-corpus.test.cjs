@@ -454,3 +454,67 @@ test('md-136 N6: listing a credential flag recovers the SUBCOMMAND without its v
     assert.ok(!out.includes(argv[2]), `and the value must still be gone — ${JSON.stringify(out)}`);
   }
 });
+
+// 2026-10-08 corpus: a real agent id reached the file. The id was not live at that
+// moment, so it was not in agentIds, and it sat under worktrees/, not hive/agents/,
+// so the "unknown id" mask did not apply. Every workspace container is now a place an
+// id lives, and a segment that carries a known id inside a longer name is no longer
+// written either.
+const WS_CTX = { ...CTX, workspaceContainers: ['/Users/dev/Harness/worktrees', '/Users/dev/Harness/code-worktrees'] };
+
+test('leak: an id that is not live, under a workspace container, is masked', () => {
+  const n = (p) => normalizeForCorpus(p, WS_CTX);
+  assert.equal(n('/Users/dev/Harness/worktrees/meredith-zz9q1/CLAUDE.md'), '<home>/Harness/worktrees/<agent:unknown>/CLAUDE.md');
+  assert.equal(n('/Users/dev/Harness/code-worktrees/meredith-zz9q1/T-1/portal'), '<home>/Harness/code-worktrees/<agent:unknown>/T-1/portal');
+  assert.equal(n('/Users/dev/Harness/worktrees/ryan-2/a.md'), '<home>/Harness/worktrees/<agent:other>/a.md', 'a live id keeps its label');
+  assert.equal(n('/Users/dev/Harness/worktrees/jim-1'), '<home>/Harness/worktrees/<agent:self>');
+  assert.equal(n('/Users/dev/Harness/worktrees'), '<home>/Harness/worktrees', 'the container itself names nobody');
+  assert.equal(n('/Users/dev/other/worktrees/x-1/a.md'), '<home>/other/worktrees/x-1/a.md', 'only the configured containers');
+});
+
+test('leak: a segment carrying a known id inside a longer name is not written', () => {
+  const n = (p) => normalizeForCorpus(p, WS_CTX);
+  const out = n('/Users/dev/Harness/hive/agents/jim-1/outbox/2026-10-05-ryan-2-status.json');
+  assert.ok(!out.includes('ryan-2'), out);
+  assert.equal(out, '<hive>/agents/<agent:self>/outbox/<x>');
+  assert.equal(n('/Users/dev/Harness/hive/agents/jim-1/outbox/status.json'), '<hive>/agents/<agent:self>/outbox/status.json', 'an ordinary name stays');
+});
+
+test('leak e2e: the engine passes its workspace containers, so a decision row carries no stray id', async (t) => {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'md136-ws-')));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const hiveRoot = path.join(base, 'hive');
+  fs.mkdirSync(path.join(hiveRoot, 'policy'), { recursive: true });
+  const pack = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'examples/policy/engine.example.json'), 'utf8'));
+  delete pack._comment;
+  fs.writeFileSync(path.join(hiveRoot, 'policy', 'engine.json'), JSON.stringify(pack));
+  const ws = [{ agentId: 'jim-1', roots: [path.join(base, 'wt', 'jim-1')] }, { agentId: 'ryan-2', roots: [path.join(base, 'wt', 'ryan-2')] }];
+  for (const w of ws) fs.mkdirSync(w.roots[0], { recursive: true });
+  const engine = new PolicyEngine(hiveRoot, () => {}, () => [], () => ws, () => true, undefined, () => [path.join(base, 'wt')]);
+  engine.load();
+  const v = engine.evaluate({ hook_event_name: 'PreToolUse', agent_id: 'jim-1', tool_name: 'Bash', cwd: path.join(base, 'wt', 'jim-1'),
+    tool_input: { command: `awk 1 ${path.join(base, 'wt', 'meredith-zz9q1', 'CLAUDE.md')}; cp x ${path.join(base, 'wt', 'ryan-2', 'CLAUDE.md')}` } });
+  assert.ok(v.ruleId, 'precondition: a decision worth recording');
+  const body = fs.readFileSync(path.join(hiveRoot, 'policy', CORPUS_FILE), 'utf8');
+  assert.ok(!body.includes('meredith'), body);
+  assert.ok(body.includes('<agent:unknown>'));
+});
+
+test('leak: the hook server gives the engine its workspace containers', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'hooks.ts'), 'utf8');
+  assert.match(src, /workspaceContainers\(\)/, 'HookServer supplies them');
+});
+
+test('leak: a known id in a program name, a subcommand slot or a flag name is not written either', () => {
+  const s = (argv) => scrubArgv(argv, WS_CTX);
+  assert.deepEqual(s(['/x/ryan-2-deploy', 'a']), ['<prog>', '<arg>']);
+  assert.deepEqual(s(['mempalace', 'ryan-2']), ['mempalace', '<arg>']);
+  assert.deepEqual(s(['tool', '--for-ryan-2', 'x']), ['tool', '<flag>', '<arg>']);
+  assert.deepEqual(s(['git', 'status', '--short']), ['git', 'status', '--short'], 'ordinary shape untouched');
+});
+
+test('leak: a short fixed id is masked as a whole segment only, so ordinary names survive', () => {
+  const n = (p) => normalizeForCorpus(p, WS_CTX);
+  assert.equal(n('/Users/dev/Harness/hive/agents/god/memory.md'), '<hive>/agents/<agent:other>/memory.md');
+  assert.equal(n('/Users/dev/repo/godot-notes.md'), '<home>/repo/godot-notes.md');
+});

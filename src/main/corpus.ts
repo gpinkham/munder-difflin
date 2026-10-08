@@ -58,6 +58,9 @@ export interface CorpusContext {
   agentId?: string | null;
   /** Every agent id the floor knows, so a colleague's id is normalized rather than written. */
   agentIds?: string[];
+  /** Absolute directories whose next segment is an agent id (<harnessHome>/worktrees,
+   *  code-worktrees, …). An id there is masked even when it is not live. */
+  workspaceContainers?: string[];
   home?: string | null;
   hiveRoot?: string | null;
   policyDir?: string | null;
@@ -131,11 +134,24 @@ export function normalizeForCorpus(raw: unknown, ctx: CorpusContext): string {
     if (p.startsWith(dir + '/')) { prefix = label; p = p.slice(dir.length + 1); break; }
   }
 
+  // The segment right after a workspace container is an agent id, live or not
+  // (2026-10-08: an archived id under worktrees/ was written verbatim). Its index is
+  // counted on the raw path and carried over to `segs` below.
+  const rawSegs = raw.replace(/\/+$/, '').split('/').filter(Boolean);
+  const idAt = new Set<number>();
+  for (const c of ctx.workspaceContainers ?? []) {
+    const cs = c.replace(/\/+$/, '').split('/').filter(Boolean);
+    if (cs.length && rawSegs.length > cs.length && cs.every((x, k) => rawSegs[k] === x)) idAt.add(cs.length);
+  }
   const out: string[] = [];
   const segs = p.split('/').filter(Boolean);
+  const offset = rawSegs.length - segs.length;
   segs.forEach((seg, i) => {
     const known = agentLabel(seg, ctx);
     if (known) { out.push(known); return; }
+    if (idAt.has(i + offset)) { out.push('<agent:unknown>'); return; }
+    // A known id inside a longer name (`2026-…-<id>-status.json`) is still the id.
+    if (carriesId(seg, ctx)) { out.push('<x>'); return; }
     // An id we do not know still sits in the agents directory, and its NAME is not
     // ours to publish — say where it is instead.
     if (i > 0 && segs[i - 1] === 'agents' && (prefix === '<hive>' || prefix === '<policy>')) {
@@ -228,6 +244,17 @@ function subcommandIndex(argv: string[]): number {
   return i;
 }
 
+/** Does this token carry a known agent id anywhere in it? Then it is not shape. */
+function carriesId(tok: string, ctx: CorpusContext): boolean {
+  return embeddableIds(ctx).some((id) => tok.includes(id));
+}
+
+/** Ids long enough to look for INSIDE a name. A short fixed id ('god') would mask
+ *  every name that happens to contain it; it is still masked as a whole segment. */
+function embeddableIds(ctx: CorpusContext): string[] {
+  return [ctx.agentId, ...(ctx.agentIds ?? [])].filter((id): id is string => !!id && id.length >= 6);
+}
+
 /** One argv token, reduced to shape. Position decides the rule, never appearance. */
 function scrubToken(tok: string, index: number, ctx: CorpusContext, prog: string, subAt: number): string {
   if (typeof tok !== 'string') return '<arg>';
@@ -237,19 +264,19 @@ function scrubToken(tok: string, index: number, ctx: CorpusContext, prog: string
 
   if (index === 0) {
     const base = tok.split('/').pop() ?? '';
-    return safeSegment(base) ? base : '<prog>';
+    return safeSegment(base) && !carriesId(base, ctx) ? base : '<prog>';
   }
 
   // The verb's second half, and only there: the first token after a known multi-verb
   // program, and only when it is keyword-shaped. A credential in that slot is still a
   // value and still goes.
-  if (index === subAt && MULTI_VERB.has(prog) && SUBCOMMAND.test(tok) && safeSegment(tok)) return tok;
+  if (index === subAt && MULTI_VERB.has(prog) && SUBCOMMAND.test(tok) && safeSegment(tok) && !carriesId(tok, ctx)) return tok;
 
   if (tok.startsWith('--')) {
     const eq = tok.indexOf('=');
     const name = eq === -1 ? tok : tok.slice(0, eq);
     const suffix = eq === -1 ? '' : '=<v>';
-    return flagNameIsShape(name) ? `${name}${suffix}` : `<flag>${suffix}`;
+    return flagNameIsShape(name) && !carriesId(name, ctx) ? `${name}${suffix}` : `<flag>${suffix}`;
   }
   if (tok.startsWith('-') && tok.length > 1) {
     // A short cluster is shape; a value ATTACHED to one (`-uSECRET`) is not, so only

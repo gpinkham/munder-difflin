@@ -623,6 +623,17 @@ export class HookServer {
       });
   }
 
+  /** Where agent ids are folder names: the hive's agents/ and each configured
+   *  workspace root under harnessHome. The corpus masks any id found there. */
+  private workspaceContainers(): string[] {
+    try {
+      const root = this.hive.root();
+      const home = this.getConfig().harnessHome;
+      const { roots } = sanitizeWorkspaceRoots(this.getConfig().workspaceRoots);
+      return [...(root ? [join(root, 'agents')] : []), ...(home ? roots.map((r) => join(home, r)) : [])];
+    } catch { return []; }
+  }
+
   /** Build the policy engine once, on first PreToolUse. */
   private policyEngine(): PolicyEngine {
     if (!this.policy) {
@@ -637,7 +648,9 @@ export class HookServer {
         () => { try { return this.agentWorkspaces(); } catch { return []; } },
         // md-136: on unless the config file says otherwise. Read per decision, so
         // turning it off takes effect without a restart.
-        () => { try { return this.getConfig().decisionCorpus !== false; } catch { return false; } }
+        () => { try { return this.getConfig().decisionCorpus !== false; } catch { return false; } },
+        undefined,
+        () => this.workspaceContainers()
       );
       this.policy.load();
     }

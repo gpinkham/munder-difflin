@@ -403,7 +403,10 @@ export class PolicyEngine {
      *  harness supplies the config, where it defaults ON. */
     private corpusEnabled: () => boolean = () => false,
     /** How the grant check reads a repo (push url, push risks). Injected by tests. */
-    private gitInspect: GitInspector = gitInspector
+    private gitInspect: GitInspector = gitInspector,
+    /** Absolute directories whose next segment is an agent id, so the corpus can
+     *  mask an id there that is not live (2026-10-08 leak). */
+    private workspaceContainers: () => string[] = () => []
   ) {
     this.hiveRoot = hiveRoot;
     this.policyDir = hiveRoot ? join(hiveRoot, 'policy') : '';
@@ -1020,6 +1023,7 @@ export class PolicyEngine {
       const cctx: CorpusContext = {
         agentId: p.agent_id ?? null,
         agentIds: this.workspaces().map((w) => w.agentId),
+        workspaceContainers: (() => { try { return this.workspaceContainers(); } catch { return []; } })(),
         home: homedir(),
         hiveRoot: this.hiveRoot,
         policyDir: this.policyDir,
