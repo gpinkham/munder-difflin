@@ -612,7 +612,7 @@ export class HookServer {
       .map(([id, a]) => {
         // md-223 N1: the id is joined as a path segment, so it is the one way this
         // feature could produce a false DENY. A hand-edited registry id like
-        // '../code-worktrees/<colleague>/portal' would both own the colleague's
+        // '../code-worktrees/<colleague>/app' would both own the colleague's
         // checkout (flagging their own writes) and knock their root out of
         // ownedRoots as a container; '../../etc' would own outside harnessHome. So an
         // id that is not one plain segment derives no root at all — failing toward

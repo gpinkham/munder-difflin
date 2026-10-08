@@ -465,7 +465,7 @@ const WS_CTX = { ...CTX, workspaceContainers: ['/Users/dev/Harness/worktrees', '
 test('leak: an id that is not live, under a workspace container, is masked', () => {
   const n = (p) => normalizeForCorpus(p, WS_CTX);
   assert.equal(n('/Users/dev/Harness/worktrees/meredith-zz9q1/CLAUDE.md'), '<home>/Harness/worktrees/<agent:unknown>/CLAUDE.md');
-  assert.equal(n('/Users/dev/Harness/code-worktrees/meredith-zz9q1/T-1/portal'), '<home>/Harness/code-worktrees/<agent:unknown>/T-1/portal');
+  assert.equal(n('/Users/dev/Harness/code-worktrees/meredith-zz9q1/T-1/app'), '<home>/Harness/code-worktrees/<agent:unknown>/T-1/app');
   assert.equal(n('/Users/dev/Harness/worktrees/ryan-2/a.md'), '<home>/Harness/worktrees/<agent:other>/a.md', 'a live id keeps its label');
   assert.equal(n('/Users/dev/Harness/worktrees/jim-1'), '<home>/Harness/worktrees/<agent:self>');
   assert.equal(n('/Users/dev/Harness/worktrees'), '<home>/Harness/worktrees', 'the container itself names nobody');

@@ -123,8 +123,8 @@ async function dayJobFloor(t, cfg) {
   await hive.ensureAgent({ id: 'old-1', name: 'Old', provider: 'claude', cwd: path.join(home, 'old') });
   hive.setArchived('old-1', true);
   const cw = (id, ...rest) => path.join(home, 'code-worktrees', id, ...rest);
-  for (const id of ['ryan-1', 'jim-1', 'nobody-9', 'old-1']) fs.mkdirSync(cw(id, 'portal'), { recursive: true });
-  fs.writeFileSync(cw('ryan-1', 'portal', '.DS_Store'), 'x');
+  for (const id of ['ryan-1', 'jim-1', 'nobody-9', 'old-1']) fs.mkdirSync(cw(id, 'app'), { recursive: true });
+  fs.writeFileSync(cw('ryan-1', 'app', '.DS_Store'), 'x');
   fs.mkdirSync(path.join(home, 'repo', 'md199-guardrail'), { recursive: true }); // a TASK-named worktree
   const asJim = (command) => f.server.policyEngine().evaluate({
     hook_event_name: 'PreToolUse', agent_id: 'jim-1', tool_name: 'Bash',
@@ -135,31 +135,31 @@ async function dayJobFloor(t, cfg) {
 
 test('md-223: removing a live colleague\'s code-worktree now fires', async (t) => {
   const { cw, asJim } = await dayJobFloor(t);
-  const v = asJim(`rm -rf ${cw('ryan-1', 'portal')}`);
+  const v = asJim(`rm -rf ${cw('ryan-1', 'app')}`);
   assert.equal(v.ruleId, 'cross-agent-workspace', 'the md-220 layout must be owned now');
   assert.equal(v.matchedOn, 'path_in_other_agent_workspace');
 });
 
 test('md-223: md-220 step 5 exactly — rm -f .DS_Store then rmdir — fires', async (t) => {
   const { cw, asJim } = await dayJobFloor(t);
-  const dir = cw('ryan-1', 'portal');
+  const dir = cw('ryan-1', 'app');
   assert.equal(asJim(`rm -f ${dir}/.DS_Store && rmdir ${dir}`).ruleId, 'cross-agent-workspace');
 });
 
 test('md-223: an unknown id under a root is NOT attributed (false-allow, never false-deny)', async (t) => {
   const { cw, asJim } = await dayJobFloor(t);
-  assert.equal(asJim(`rm -rf ${cw('nobody-9', 'portal')}`).ruleId, undefined,
+  assert.equal(asJim(`rm -rf ${cw('nobody-9', 'app')}`).ruleId, undefined,
     'a directory named for nobody live belongs to nobody');
 });
 
 test('md-223: a dead agent\'s leftovers are NOT attributed, so anyone may clean them up', async (t) => {
   const { cw, asJim } = await dayJobFloor(t);
-  assert.equal(asJim(`rm -rf ${cw('old-1', 'portal')}`).ruleId, undefined);
+  assert.equal(asJim(`rm -rf ${cw('old-1', 'app')}`).ruleId, undefined);
 });
 
 test('md-223: your own code-worktree is yours', async (t) => {
   const { cw, asJim } = await dayJobFloor(t);
-  assert.equal(asJim(`rm -rf ${cw('jim-1', 'portal')}`).ruleId, undefined);
+  assert.equal(asJim(`rm -rf ${cw('jim-1', 'app')}`).ruleId, undefined);
 });
 
 test('md-223: a shared cwd is still nobody\'s, and a task-named worktree stays unowned (this floor: a no-op)',
@@ -244,22 +244,22 @@ test('md-223 N1: a forged registry id cannot steal a colleague\'s checkout or ow
     const regPath = path.join(hive.root(), 'registry.json');
     const reg = JSON.parse(fs.readFileSync(regPath, 'utf8'));
     const elsewhere = path.join(home, 'elsewhere');
-    for (const id of ['../code-worktrees/ryan-1/portal', '../../../etc']) {
+    for (const id of ['../code-worktrees/ryan-1/app', '../../../etc']) {
       reg.agents[id] = { id, name: 'Forged', provider: 'claude', cwd: elsewhere, status: 'idle', lastSeen: 0 };
     }
     fs.writeFileSync(regPath, JSON.stringify(reg));
-    fs.mkdirSync(cw('ryan-1', 'portalclient'), { recursive: true });
+    fs.mkdirSync(cw('ryan-1', 'webclient'), { recursive: true });
 
     // Direction 1 — false DENY: ryan working in his own checkout must not be flagged.
     const ryan = server.policyEngine().evaluate({
       hook_event_name: 'PreToolUse', agent_id: 'ryan-1', tool_name: 'Bash',
-      tool_input: { command: `rm -rf ${cw('ryan-1', 'portal')}` }, cwd: path.join(home, 'repo'),
+      tool_input: { command: `rm -rf ${cw('ryan-1', 'app')}` }, cwd: path.join(home, 'repo'),
     });
     assert.equal(ryan.ruleId, undefined, "ryan's own checkout must stay his");
 
     // Direction 2 — false ALLOW: ryan's root must survive, so the REST of his checkout
     // is still protected from jim.
-    assert.equal(asJim(`rm -rf ${cw('ryan-1', 'portalclient')}`).ruleId, 'cross-agent-workspace',
+    assert.equal(asJim(`rm -rf ${cw('ryan-1', 'webclient')}`).ruleId, 'cross-agent-workspace',
       "a forged id must not knock ryan's root out of ownedRoots");
 
     // And a forged id gets no id-derived root at all — only the cwd it registered.
