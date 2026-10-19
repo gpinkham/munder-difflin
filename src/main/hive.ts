@@ -971,8 +971,18 @@ export class HiveManager {
     // Store the EXPANDED cwd, never the raw `~/…` the user typed — the registry is
     // read by hooks, the roster and the worker watcher, none of which run a shell.
     const cwd = this.cwdValidity(meta.cwd);
+    // ...but not across a provider change. A session id belongs to the CLI
+    // that wrote it: an agent switched from Claude to OpenCode kept its Claude
+    // UUIDs, and startup restore handed them to `opencode --session`, which
+    // refuses anything not starting ses_. An entry with no provider predates
+    // the field and ran Claude; a spawn that names no provider changes nothing.
+    const switched = !!prev && !!meta.provider && (prev.provider ?? 'claude') !== meta.provider;
+    if (switched && (prev.sessionId || prev.sessionHistory?.length)) {
+      console.warn(`[hive] ${meta.id}: provider ${prev.provider ?? 'claude'} -> ${meta.provider}, dropping its recorded session ids`);
+    }
     reg.agents[meta.id] = {
       ...prev,
+      ...(switched ? { sessionId: undefined, sessionHistory: undefined } : {}),
       ...meta,
       capabilities: meta.capabilities ?? prev?.capabilities ?? [],
       role,
