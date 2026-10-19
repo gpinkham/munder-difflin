@@ -132,18 +132,38 @@ export function storeHasSession(spec: SessionStoreSpec, sid: string, list: DirLi
 }
 
 /**
+ * True unless `sid` has a shape this provider's CLI refuses outright. The
+ * registry keeps an agent's sessionId and sessionHistory across a provider
+ * change, so an agent that once ran as Claude still carries Claude's UUIDs
+ * after it is switched to OpenCode. Startup restore then launched
+ * `opencode --session <uuid>`, which OpenCode rejects ("should start with
+ * ses_") and the agent never came up. Only shapes a CLI enforces are listed:
+ * an unknown shape fits, so the store check or the unchecked attach decides.
+ */
+export function sessionIdFits(provider: AgentProvider, sid: string): boolean {
+  switch (provider) {
+    case 'opencode': return sid.startsWith('ses_'); // e.g. ses_eb5c0e2acffeNTP41gGOEwO3Lp
+    default: return true;
+  }
+}
+
+/**
  * The one decision a non-Claude, non-Codex restart makes: which recorded id
  * to hand the CLI, or undefined to start fresh AND SAY SO.
+ *  - an id whose shape the CLI refuses (sessionIdFits) is never a candidate,
  *  - a checkable store: the newest candidate the store actually has,
  *  - no spec, or a store never written under this root: the newest
  *    candidate, unchecked, because dropping a possibly good id loses a
  *    session to save a maybe.
  */
 export function chooseResumeSession(
-  candidates: readonly (string | undefined | null)[],
+  recorded: readonly (string | undefined | null)[],
   spec: SessionStoreSpec | null,
-  list: DirLister
+  list: DirLister,
+  fits: (sid: string) => boolean = () => true
 ): { sid: string | undefined; checked: boolean } {
+  const candidates = recorded.filter((c): c is string => !!c && fits(c));
+  if (candidates.length === 0 && recorded.some(Boolean)) return { sid: undefined, checked: true };
   const first = candidates.find((c): c is string => !!c);
   if (!spec || !storeCanCheck(spec, list)) return { sid: first, checked: false };
   for (const c of candidates) {

@@ -101,7 +101,7 @@ import { RESPAWNING, reasonFromRenderer, type TeardownReason } from '../shared/w
 import { spawnedCard } from '../shared/spawnedCard';
 import { IdeDirtyLedger, ideQuitWarning } from '../shared/ideBuffers';
 import { pickResumableSession, sampleProvesConversation } from '../shared/resumeKey';
-import { chooseResumeSession, providerSessionStore, type DirLister, type StoreContext } from '../shared/resumeStore';
+import { chooseResumeSession, providerSessionStore, sessionIdFits, type DirLister, type StoreContext } from '../shared/resumeStore';
 import { inboxNudgeText } from '../shared/hiveNudge';
 import { resolveGodName } from '../shared/godIdentity';
 import { slowSpawnDelayMs } from '../shared/restoreSlow';
@@ -4470,7 +4470,12 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
         cwd: opts.cwd,
         readText: (f) => { try { return readFileSync(f, 'utf8'); } catch { return null; } }
       };
-      const picked = chooseResumeSession(walked, providerSessionStore(provider, storeCtx), listDir);
+      // An id this CLI refuses by shape is skipped, never handed over: a
+      // Claude UUID kept from before a provider switch crashed OpenCode at
+      // startup restore ("should start with ses_").
+      const misfit = walked.filter((s) => !!s && !sessionIdFits(provider, s));
+      if (misfit.length > 0) console.warn(`[resume] ${opts.hive.id}: skipped recorded id(s) that are not ${provider} session ids: ${misfit.join(', ')}`);
+      const picked = chooseResumeSession(walked, providerSessionStore(provider, storeCtx), listDir, (s) => sessionIdFits(provider, s));
       if (picked.checked && picked.sid && picked.sid !== sid) {
         console.warn(`[resume] ${opts.hive.id}: recorded ${provider} session is not in its store, resuming the earlier session "${picked.sid}"`);
       }

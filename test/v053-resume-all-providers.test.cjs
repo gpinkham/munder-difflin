@@ -19,7 +19,7 @@ const path = require('node:path');
 const { execFileSync, spawnSync } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
 
-const { providerSessionStore, storeCanCheck, storeHasSession, chooseResumeSession } = loadTs('src/shared/resumeStore.ts');
+const { providerSessionStore, storeCanCheck, storeHasSession, chooseResumeSession, sessionIdFits } = loadTs('src/shared/resumeStore.ts');
 const { providerPreset } = loadTs('src/shared/agentProvider.ts');
 
 const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
@@ -151,6 +151,23 @@ test('chooseResumeSession: newest real id wins, a stale key falls back to the ol
   assert.equal(chooseResumeSession([], spec, list).sid, undefined);
 });
 
+test('an OpenCode agent that once ran as Claude: its Claude UUID is skipped, never sent to opencode --session', () => {
+  // The registry keeps sessionId and sessionHistory across a provider change,
+  // so startup restore handed OpenCode a Claude UUID and OpenCode refused it
+  // ("should start with ses_"). OpenCode has no store spec, so the shape is
+  // the only check.
+  const fits = (s) => sessionIdFits('opencode', s);
+  const uuid = '3a71c769-245e-423b-915a-f107a5b82b40';
+  assert.equal(sessionIdFits('opencode', 'ses_eb5c0e2acffeNTP41gGOEwO3Lp'), true);
+  assert.equal(sessionIdFits('opencode', uuid), false);
+  assert.deepEqual(chooseResumeSession([uuid], null, listerOf({}), fits), { sid: undefined, checked: true }, 'only foreign ids: start fresh and say so');
+  assert.deepEqual(chooseResumeSession([uuid, 'ses_older'], null, listerOf({}), fits), { sid: 'ses_older', checked: false }, 'an older OpenCode id is still resumed');
+  assert.deepEqual(chooseResumeSession(['ses_new', uuid], null, listerOf({}), fits), { sid: 'ses_new', checked: false });
+  // Providers without an enforced shape are unchanged.
+  for (const p of ['gemini', 'antigravity', 'crush', 'copilot', 'kimi', 'grok', 'qwen', 'pi', 'cursor']) assert.equal(sessionIdFits(p, uuid), true, p);
+  assert.deepEqual(chooseResumeSession([uuid], null, listerOf({})), { sid: uuid, checked: false }, 'no predicate: attached unchecked, as before');
+});
+
 /* ---- the real filesystem, in a throwaway home ----------------------------- */
 
 test('the same rules against a real disk: a kimi store, a qwen store and a per agent pi dir in a throwaway home', () => {
@@ -207,9 +224,9 @@ test('live: each installed CLI names its resume flag in --help', (t) => {
 test('main: the non-Claude restart walks the recorded ids, checks the store, and says fresh out loud', () => {
   const main = read('src/main/index.ts');
   assert.match(main, /const walked = typedSid \? \[typedSid\] : \(opts\.resume === true \? hive\.resumeCandidates\(opts\.hive\.id\) : \[\]\);/, 'the walk covers every recorded id, and a typed id stays authoritative');
-  assert.match(main, /chooseResumeSession\(walked, providerSessionStore\(provider, storeCtx\), listDir\)/, 'the store check gates the flag');
+  assert.match(main, /chooseResumeSession\(walked, providerSessionStore\(provider, storeCtx\), listDir, \(s\) => sessionIdFits\(provider, s\)\)/, 'the store check and the id shape gate the flag');
   assert.match(main, /env: \{ \.\.\.process\.env, \.\.\.\(opts\.env \?\? \{\}\) \}/, 'the store is resolved from the env the CLI is spawned with, not from ~ alone');
   assert.match(main, /no recorded \$\{provider\} session exists in its store - starting a fresh session/, 'fresh is said, never silent');
   assert.match(main, /pickResumableSession\(walked, \(s\) => !!findCodexHomeForSession\(s, agentsRoot\)\)/, 'codex walks the same candidates through its own owner check');
-  assert.match(main, /import \{ chooseResumeSession, providerSessionStore, type DirLister, type StoreContext \} from '\.\.\/shared\/resumeStore';/);
+  assert.match(main, /import \{ chooseResumeSession, providerSessionStore, sessionIdFits, type DirLister, type StoreContext \} from '\.\.\/shared\/resumeStore';/);
 });
